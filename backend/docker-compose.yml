@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: bfast_postgres
+    restart: unless-stopped
+    ports:
+      - '5433:5432'
+    environment:
+      POSTGRES_DB: bfast_dev
+      POSTGRES_USER: bfast_user
+      POSTGRES_PASSWORD: bfast_dev_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Auto-run all migration SQL files on first startup
+      - ./database/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U bfast_user -d bfast_dev']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

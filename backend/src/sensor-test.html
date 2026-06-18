@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>BFast Sensor Test</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --card: #13131a;
+    --border: #1e1e2e;
+    --accent: #6c5ce7;
+    --accent2: #00cec9;
+    --green: #00b894;
+    --red: #e17055;
+    --yellow: #fdcb6e;
+    --text: #dfe6e9;
+    --muted: #636e72;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100dvh;
+    padding: 16px;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  h1 {
+    font-size: 1.4rem;
+    font-weight: 700;
+    text-align: center;
+    margin-bottom: 4px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .subtitle {
+    text-align: center;
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-bottom: 16px;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+
+  .card h2 {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--muted);
+    margin-bottom: 10px;
+  }
+
+  .sensor-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 8px;
+  }
+
+  .sensor-val {
+    text-align: center;
+  }
+
+  .sensor-val label {
+    display: block;
+    font-size: 0.65rem;
+    color: var(--muted);
+    margin-bottom: 2px;
+  }
+
+  .sensor-val span {
+    font-size: 1.3rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .accel-val { color: var(--accent); }
+  .gyro-val { color: var(--accent2); }
+
+  .status-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.7rem;
+    font-weight: 600;
+  }
+
+  .status-active { background: rgba(0, 184, 148, 0.15); color: var(--green); }
+  .status-inactive { background: rgba(225, 112, 85, 0.15); color: var(--red); }
+  .status-waiting { background: rgba(253, 203, 110, 0.15); color: var(--yellow); }
+
+  #tapZone {
+    background: linear-gradient(135deg, rgba(108, 92, 231, 0.08), rgba(0, 206, 201, 0.08));
+    border: 2px dashed var(--border);
+    border-radius: 16px;
+    padding: 28px 16px;
+    text-align: center;
+    transition: all 0.15s ease;
+    margin-bottom: 12px;
+  }
+
+  #tapZone.detected {
+    border-color: var(--green);
+    background: rgba(0, 184, 148, 0.1);
+    box-shadow: 0 0 30px rgba(0, 184, 148, 0.15);
+  }
+
+  #tapZone .emoji { font-size: 2.5rem; margin-bottom: 6px; }
+  #tapZone .label { font-size: 0.85rem; color: var(--muted); }
+  #tapZone .value { font-size: 1.5rem; font-weight: 700; margin-top: 4px; }
+
+  .config-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+
+  .config-row label {
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+
+  .config-row input, .config-row select {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    width: 180px;
+  }
+
+  button {
+    width: 100%;
+    padding: 14px;
+    border: none;
+    border-radius: 10px;
+    font-size: 0.9rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    margin-bottom: 8px;
+  }
+
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent), #a855f7);
+    color: white;
+  }
+
+  .btn-secondary {
+    background: linear-gradient(135deg, var(--accent2), #00b894);
+    color: white;
+  }
+
+  .btn-outline {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+
+  button:active { transform: scale(0.97); }
+
+  #log {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.65rem;
+    line-height: 1.6;
+    max-height: 200px;
+    overflow-y: auto;
+    color: var(--muted);
+  }
+
+  .log-success { color: var(--green); }
+  .log-error { color: var(--red); }
+  .log-info { color: var(--accent); }
+  .log-warn { color: var(--yellow); }
+
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<h1>⚡ BFast Sensor Test</h1>
+<p class="subtitle">Tap your phone to test accelerometer + gyroscope bump detection</p>
+
+<!-- Sensor Status -->
+<div class="card">
+  <h2>📡 Sensor Status</h2>
+  <div style="display:flex; gap:8px; flex-wrap:wrap;">
+    <span id="accelStatus" class="status-badge status-inactive">Accel: Off</span>
+    <span id="gyroStatus" class="status-badge status-inactive">Gyro: Off</span>
+    <span id="apiStatus" class="status-badge status-inactive">API: Not connected</span>
+  </div>
+</div>
+
+<!-- Live Readings -->
+<div class="card">
+  <h2>📊 Live Sensor Readings</h2>
+  <div class="sensor-grid">
+    <div class="sensor-val">
+      <label>Accel X</label>
+      <span class="accel-val" id="ax">0.00</span>
+    </div>
+    <div class="sensor-val">
+      <label>Accel Y</label>
+      <span class="accel-val" id="ay">0.00</span>
+    </div>
+    <div class="sensor-val">
+      <label>Accel Z</label>
+      <span class="accel-val" id="az">0.00</span>
+    </div>
+    <div class="sensor-val">
+      <label>Gyro X</label>
+      <span class="gyro-val" id="gx">0.00</span>
+    </div>
+    <div class="sensor-val">
+      <label>Gyro Y</label>
+      <span class="gyro-val" id="gy">0.00</span>
+    </div>
+    <div class="sensor-val">
+      <label>Gyro Z</label>
+      <span class="gyro-val" id="gz">0.00</span>
+    </div>
+  </div>
+  <div style="margin-top:10px; text-align:center;">
+    <label style="font-size:0.65rem; color:var(--muted)">Magnitude</label>
+    <div style="display:flex; justify-content:center; gap:24px; margin-top:4px;">
+      <span style="font-size:1.1rem; font-weight:700;" class="accel-val">|a| = <span id="aMag">0.00</span></span>
+      <span style="font-size:1.1rem; font-weight:700;" class="gyro-val">|ω| = <span id="gMag">0.00</span></span>
+    </div>
+  </div>
+</div>
+
+<!-- Tap Detection -->
+<div id="tapZone">
+  <div class="emoji" id="tapEmoji">👆</div>
+  <div class="label" id="tapLabel">Tap or bump your phone to detect</div>
+  <div class="value" id="tapValue"></div>
+  <button class="btn-outline" id="btnMockTap" style="margin-top: 15px; font-size: 0.8rem; padding: 8px;">🎲 Generate Mock Tap (Bypass Sensors)</button>
+</div>
+
+<!-- Config -->
+<div class="card">
+  <h2>⚙️ Configuration</h2>
+  <div class="config-row" style="margin-bottom: 12px">
+    <button class="btn-primary" id="btnAutoLogin" style="margin:0; background:linear-gradient(135deg, #0984e3, #74b9ff)">🔑 1-Click Auto Login</button>
+  </div>
+  <div class="config-row">
+    <label>Backend URL</label>
+    <input id="apiUrl" type="text" value="http://192.168.0.147:3000" />
+  </div>
+  <div class="config-row">
+    <label>JWT Token</label>
+    <input id="jwtToken" type="password" placeholder="Will auto-fill" />
+  </div>
+  <div class="config-row">
+    <label>Device ID</label>
+    <input id="deviceId" type="text" placeholder="Will auto-fill" />
+  </div>
+  <div class="config-row">
+    <label>Role</label>
+    <select id="role">
+      <option value="receiver">Receiver (passive)</option>
+      <option value="sender">Sender (active)</option>
+    </select>
+  </div>
+  <div class="config-row">
+    <label>Tap Threshold (m/s²)</label>
+    <input id="tapThreshold" type="number" value="3.0" step="0.5" />
+  </div>
+</div>
+
+<!-- Actions -->
+<button class="btn-primary" id="btnStartSensors">▶ Start Sensors</button>
+<button class="btn-secondary" id="btnSendBump">📤 Send Last Tap as Bump</button>
+<button class="btn-outline" id="btnTestApi">🔌 Test API Connection</button>
+
+<!-- Log -->
+<div class="card">
+  <h2>📋 Event Log</h2>
+  <div id="log"></div>
+</div>
+
+<script>
+// ─── State ──────────────────────────────────────────────────────────────────
+let sensorsActive = false;
+let lastAccel = { x: 0, y: 0, z: 0, magnitude: 0 };
+let lastGyro = { x: 0, y: 0, z: 0, magnitude: 0 };
+let lastTap = null;
+let tapCooldown = false;
+
+// ─── DOM refs ───────────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+
+// ─── Logging ────────────────────────────────────────────────────────────────
+function log(msg, cls = '') {
+  const logEl = $('log');
+  const time = new Date().toLocaleTimeString('en-IN', { hour12: false, fractionalSecondDigits: 2 });
+  logEl.innerHTML = `<div class="${cls}">[${time}] ${msg}</div>` + logEl.innerHTML;
+  // Keep only last 50 entries
+  while (logEl.children.length > 50) logEl.removeChild(logEl.lastChild);
+}
+
+// ─── Sensor Initialization ──────────────────────────────────────────────────
+function startSensors() {
+  if (sensorsActive) {
+    log('Sensors already running', 'log-warn');
+    return;
+  }
+
+  // Try DeviceMotion API
+  if (window.DeviceMotionEvent && typeof window.DeviceMotionEvent.requestPermission === 'function') {
+    // iOS 13+ requires permission
+    DeviceMotionEvent.requestPermission().then(state => {
+      if (state === 'granted') {
+        attachMotionListener();
+      } else {
+        log('Motion permission denied', 'log-error');
+      }
+    }).catch(e => log('Permission error: ' + e.message, 'log-error'));
+  } else if (window.DeviceMotionEvent && window.isSecureContext !== false) {
+    attachMotionListener();
+  } else {
+    // Chrome on Android blocks sensors on plain HTTP unless it's localhost
+    if (!window.isSecureContext) {
+      log('❌ Chrome blocks sensors on HTTP. You must use HTTPS or localhost.', 'log-error');
+      log('👉 To fix: open a new tab and go to chrome://flags/#unsafely-treat-insecure-origin-as-secure', 'log-warn');
+      log(`👉 Add http://${location.host} and enable it.`, 'log-warn');
+      log('👉 OR just use the "Mock Tap" button above to test the backend logic immediately.', 'log-info');
+    } else {
+      log('DeviceMotion API not available on this device', 'log-error');
+    }
+  }
+}
+
+function attachMotionListener() {
+  window.addEventListener('devicemotion', onDeviceMotion, { passive: true });
+  sensorsActive = true;
+
+  $('accelStatus').className = 'status-badge status-active';
+  $('accelStatus').textContent = 'Accel: Live';
+  $('gyroStatus').className = 'status-badge status-active';
+  $('gyroStatus').textContent = 'Gyro: Live';
+
+  log('Sensors activated — accelerometer + gyroscope streaming', 'log-success');
+  $('btnStartSensors').textContent = '⏹ Sensors Active';
+}
+
+// ─── Sensor Data Handler ────────────────────────────────────────────────────
+function onDeviceMotion(event) {
+  // Acceleration including gravity (more reliable for tap detection)
+  const a = event.accelerationIncludingGravity || event.acceleration;
+  const r = event.rotationRate;
+
+  if (a) {
+    lastAccel.x = a.x || 0;
+    lastAccel.y = a.y || 0;
+    lastAccel.z = a.z || 0;
+
+    // Remove gravity component (~9.8) for tap magnitude calculation
+    // We use acceleration without gravity if available, else approximate
+    const pure = event.acceleration;
+    if (pure && pure.x != null) {
+      lastAccel.magnitude = Math.sqrt(pure.x ** 2 + pure.y ** 2 + pure.z ** 2);
+    } else {
+      // Approximate: subtract gravity from Z axis
+      const gx = a.x || 0;
+      const gy = a.y || 0;
+      const gz = (a.z || 0) - 9.81;
+      lastAccel.magnitude = Math.sqrt(gx ** 2 + gy ** 2 + gz ** 2);
+    }
+
+    $('ax').textContent = lastAccel.x.toFixed(2);
+    $('ay').textContent = lastAccel.y.toFixed(2);
+    $('az').textContent = lastAccel.z.toFixed(2);
+    $('aMag').textContent = lastAccel.magnitude.toFixed(2);
+  }
+
+  if (r) {
+    // rotationRate is in deg/s, convert to rad/s
+    lastGyro.x = (r.alpha || 0) * Math.PI / 180;
+    lastGyro.y = (r.beta || 0) * Math.PI / 180;
+    lastGyro.z = (r.gamma || 0) * Math.PI / 180;
+    lastGyro.magnitude = Math.sqrt(lastGyro.x ** 2 + lastGyro.y ** 2 + lastGyro.z ** 2);
+
+    $('gx').textContent = lastGyro.x.toFixed(2);
+    $('gy').textContent = lastGyro.y.toFixed(2);
+    $('gz').textContent = lastGyro.z.toFixed(2);
+    $('gMag').textContent = lastGyro.magnitude.toFixed(3);
+  }
+
+  // ── Tap Detection ─────────────────────────────────────────────────────
+  const threshold = parseFloat($('tapThreshold').value) || 3.0;
+  if (lastAccel.magnitude > threshold && !tapCooldown) {
+    tapCooldown = true;
+    const tapTime = new Date();
+
+    lastTap = {
+      accelPeakMs2: parseFloat(lastAccel.magnitude.toFixed(2)),
+      accelDurationMs: Math.round(event.interval || 16) * 5, // approximate
+      gyroMagnitudeRads: parseFloat(lastGyro.magnitude.toFixed(4)),
+      tapTimestamp: tapTime.toISOString(),
+      detectedAt: tapTime,
+    };
+
+    // Visual feedback
+    const zone = $('tapZone');
+    zone.classList.add('detected');
+    $('tapEmoji').textContent = '💥';
+    $('tapLabel').textContent = 'TAP DETECTED!';
+    $('tapValue').textContent =
+      `${lastTap.accelPeakMs2} m/s² · ${lastTap.gyroMagnitudeRads} rad/s`;
+
+    log(
+      `TAP! accel=${lastTap.accelPeakMs2} m/s², gyro=${lastTap.gyroMagnitudeRads} rad/s`,
+      'log-success',
+    );
+
+    // Haptic feedback
+    if (navigator.vibrate) navigator.vibrate(50);
+
+    setTimeout(() => {
+      zone.classList.remove('detected');
+      $('tapEmoji').textContent = '👆';
+      $('tapLabel').textContent = 'Tap or bump your phone to detect';
+      tapCooldown = false;
+    }, 800);
+  }
+}
+
+// ─── Mock Tap ───────────────────────────────────────────────────────────────
+function generateMockTap() {
+  const tapTime = new Date();
+  
+  // Generate realistic-looking values that will pass calibration
+  lastTap = {
+    accelPeakMs2: (Math.random() * 5 + 4).toFixed(2), // 4 - 9 m/s²
+    accelDurationMs: Math.floor(Math.random() * 50 + 40), // 40 - 90ms
+    gyroMagnitudeRads: (Math.random() * 0.5).toFixed(4), // 0 - 0.5 rad/s
+    tapTimestamp: tapTime.toISOString(),
+    detectedAt: tapTime,
+  };
+
+  const zone = $('tapZone');
+  zone.classList.add('detected');
+  $('tapEmoji').textContent = '🎲';
+  $('tapLabel').textContent = 'MOCK TAP GENERATED';
+  $('tapValue').textContent =
+    `${lastTap.accelPeakMs2} m/s² · ${lastTap.gyroMagnitudeRads} rad/s`;
+
+  log(
+    `Mock Tap! accel=${lastTap.accelPeakMs2} m/s², gyro=${lastTap.gyroMagnitudeRads} rad/s`,
+    'log-success',
+  );
+
+  if (navigator.vibrate) navigator.vibrate(50);
+
+  setTimeout(() => {
+    zone.classList.remove('detected');
+    $('tapEmoji').textContent = '👆';
+    $('tapLabel').textContent = 'Tap or bump your phone to detect';
+  }, 800);
+}
+
+// ─── Auto Login ─────────────────────────────────────────────────────────────
+function uuidv4() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
+async function autoLogin() {
+  const url = $('apiUrl').value.replace(/\/$/, '');
+  const deviceId = uuidv4();
+  const randomStr = Math.random().toString(36).substring(7);
+  
+  const payload = {
+    email: `test_${randomStr}@bfast.app`,
+    password: 'Password123!',
+    displayName: `Test User ${randomStr}`,
+    deviceId: deviceId,
+    platform: 'android'
+  };
+
+  log('Registering auto test user...', 'log-info');
+  try {
+    const res = await fetch(`${url}/api/v1/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    
+    const data = await res.json();
+    if (data.success) {
+      $('jwtToken').value = data.data.tokens.accessToken;
+      $('deviceId').value = deviceId;
+      log('✅ Auto-login successful! JWT & Device ID populated.', 'log-success');
+    } else {
+      log(`❌ Registration failed: ${JSON.stringify(data.error)}`, 'log-error');
+    }
+  } catch (e) {
+    log(`Network error: ${e.message}`, 'log-error');
+  }
+}
+
+// ─── API Calls ──────────────────────────────────────────────────────────────
+async function testApiConnection() {
+  const url = $('apiUrl').value.replace(/\/$/, '');
+  try {
+    const res = await fetch(`${url}/health`);
+    const data = await res.json();
+    if (data.success) {
+      $('apiStatus').className = 'status-badge status-active';
+      $('apiStatus').textContent = `API: Connected (${data.data.environment})`;
+      log(`API connected — ${data.data.environment} · v${data.data.version}`, 'log-success');
+    }
+  } catch (e) {
+    $('apiStatus').className = 'status-badge status-inactive';
+    $('apiStatus').textContent = 'API: Failed';
+    log(`API connection failed: ${e.message}`, 'log-error');
+  }
+}
+
+async function sendBump() {
+  if (!lastTap) {
+    log('No tap detected yet — tap your phone first!', 'log-warn');
+    return;
+  }
+
+  const url = $('apiUrl').value.replace(/\/$/, '');
+  const token = $('jwtToken').value.trim();
+  const deviceId = $('deviceId').value.trim();
+  const role = $('role').value;
+
+  if (!token) { log('JWT token required — login via Swagger first', 'log-error'); return; }
+  if (!deviceId) { log('Device ID required — get from login response', 'log-error'); return; }
+
+  const sensorSnapshot = {
+    accelPeakMs2: lastTap.accelPeakMs2,
+    accelDurationMs: lastTap.accelDurationMs,
+    gyroMagnitudeRads: lastTap.gyroMagnitudeRads,
+    tapTimestamp: lastTap.tapTimestamp,
+  };
+
+  let body, endpoint;
+
+  if (role === 'sender') {
+    // Sender needs nearbyDevices — for testing, use a dummy nearby device
+    const receiverDeviceId = prompt('Enter receiver device UUID (from other phone):');
+    if (!receiverDeviceId) return;
+
+    body = {
+      deviceId,
+      nearbyDevices: [{ deviceId: receiverDeviceId, rssi: -45 }],
+      sensorSnapshot,
+    };
+    endpoint = '/api/v1/bumps/sender';
+  } else {
+    body = {
+      deviceId,
+      sensorSnapshot,
+    };
+    endpoint = '/api/v1/bumps/receiver';
+  }
+
+  log(`Sending ${role} bump → ${endpoint}...`, 'log-info');
+  log(`Payload: accel=${sensorSnapshot.accelPeakMs2}, gyro=${sensorSnapshot.gyroMagnitudeRads}, ts=${sensorSnapshot.tapTimestamp}`, 'log-info');
+
+  try {
+    const res = await fetch(`${url}${endpoint}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    const data = await res.json();
+
+    if (data.success) {
+      log(`✅ Bump accepted! ${JSON.stringify(data.data)}`, 'log-success');
+      if (data.data?.matched) {
+        log(`🎉 MATCHED! matchId=${data.data.matchId}, timeDelta=${data.data.timeDeltaMs}ms`, 'log-success');
+      }
+    } else {
+      log(`❌ Rejected: ${data.error?.message || JSON.stringify(data.error)}`, 'log-error');
+    }
+  } catch (e) {
+    log(`Network error: ${e.message}`, 'log-error');
+  }
+}
+
+// ─── Event Listeners ────────────────────────────────────────────────────────
+$('btnAutoLogin').addEventListener('click', autoLogin);
+$('btnMockTap').addEventListener('click', generateMockTap);
+$('btnStartSensors').addEventListener('click', startSensors);
+$('btnSendBump').addEventListener('click', sendBump);
+$('btnTestApi').addEventListener('click', testApiConnection);
+
+// Auto-populate URL with current host (if opened from the server)
+if (location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+  $('apiUrl').value = `${location.protocol}//${location.hostname}:${location.port || 3000}`;
+}
+
+log('Ready — press "Start Sensors" to begin', 'log-info');
+</script>
+</body>
+</html>

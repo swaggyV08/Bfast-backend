@@ -1,0 +1,46 @@
+### Register a new user
+POST http://localhost:3000/api/v1/auth/register
+Content-Type: application/json
+
+{
+  "email": "priya@bfast.com",
+  "password": "BFast@2024",
+  "displayName": "Priya K",
+  "deviceId": "550e8400-e29b-41d4-a716-446655440000",
+  "platform": "android",
+  "deviceModel": "Samsung Galaxy S24",
+  "osVersion": "Android 14",
+  "appVersion": "1.0.0"
+}
+
+### Login
+POST http://localhost:3000/api/v1/auth/login
+Content-Type: application/json
+
+{
+  "email": "priya@bfast.com",
+  "password": "BFast@2024",
+  "deviceId": "550e8400-e29b-41d4-a716-446655440000"
+}
+
+### Get my profile (replace TOKEN with accessToken from login response)
+GET http://localhost:3000/api/v1/auth/me
+Authorization: Bearer TOKEN
+
+### Refresh tokens
+POST http://localhost:3000/api/v1/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "REFRESH_TOKEN_FROM_LOGIN",
+  "deviceId": "550e8400-e29b-41d4-a716-446655440000"
+}
+
+### Logout
+POST http://localhost:3000/api/v1/auth/logout
+Authorization: Bearer TOKEN
+Content-Type: application/json
+
+{
+  "refreshToken": "REFRESH_TOKEN"
+}
