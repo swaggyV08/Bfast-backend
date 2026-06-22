@@ -1,7 +1,10 @@
 package com.bfast.app.ui.navigation
 
+import android.app.Activity
+import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -49,16 +52,33 @@ fun BFastNavGraph(
             )
         }
         composable(Screen.Home.route) {
+            // Fix: Back press on Home should exit the app, not go to login
+            val context = LocalContext.current
+            BackHandler {
+                (context as? Activity)?.finish()
+            }
+
             com.bfast.app.ui.home.HomeScreen(
                 onNavigateToTapDetection = { navController.navigate(Screen.TapDetection.route) },
                 onNavigateToSensorTest = { navController.navigate(Screen.SensorTest.route) }
             )
         }
+        // ── Unified Tap Detection Screen (Layer 13) ─────────────────────────
+        // Shows scanning → receiver card → armed state inline.
+        // Navigates directly to Payment on TAP_CONFIRMED.
+        // No separate ReceiverDetected screen.
         composable(Screen.TapDetection.route) {
             com.bfast.app.ui.payment.TapDetectionScreen(
-                onNavigateBack = { navController.popBackStack() },
+                onNavigateBack = {
+                    com.bfast.app.core.hardware.SensorForegroundService.isSenderMode.value = false
+                    com.bfast.app.core.hardware.SensorForegroundService.resetHandshakeState()
+                    navController.popBackStack()
+                },
                 onNavigateToPayment = { deviceId, receiverName ->
-                    navController.navigate("${Screen.Payment.route}/$deviceId/$receiverName")
+                    navController.navigate("${Screen.Payment.route}/$deviceId/$receiverName") {
+                        // Pop TapDetection so back from Payment goes to Home
+                        popUpTo(Screen.Home.route)
+                    }
                 }
             )
         }
@@ -68,7 +88,11 @@ fun BFastNavGraph(
             com.bfast.app.ui.payment.PaymentEntryScreen(
                 targetDeviceId = deviceId,
                 receiverName = receiverName,
-                onNavigateBack = { navController.popBackStack() },
+                onNavigateBack = {
+                    com.bfast.app.core.hardware.SensorForegroundService.isSenderMode.value = false
+                    com.bfast.app.core.hardware.SensorForegroundService.resetHandshakeState()
+                    navController.popBackStack()
+                },
                 onNavigateToProcessing = { amountPaise ->
                     navController.navigate("${Screen.Processing.route}/$deviceId/$receiverName/$amountPaise")
                 }

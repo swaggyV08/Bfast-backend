@@ -3,6 +3,7 @@ package com.bfast.app.data.repository
 import com.bfast.app.data.remote.BFastApi
 import com.bfast.app.data.remote.ReceiverBumpRequest
 import com.bfast.app.data.remote.SenderBumpRequest
+import com.bfast.app.data.remote.TapEventRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
@@ -89,6 +90,78 @@ class BumpRepository @Inject constructor(
             Result.failure(Exception(
                 "Failed to get match: ${e.localizedMessage ?: "Unknown error"}"
             ))
+        }
+    }
+
+    suspend fun uploadSensorBatch(request: com.bfast.app.data.remote.BatchSensorRequest) = withContext(Dispatchers.IO) {
+        try {
+            val response = api.uploadSensorBatch(request)
+            if (response.isSuccessful) {
+                Result.success(Unit)
+            } else {
+                Result.failure(Exception("Failed to upload sensor batch: ${response.code()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun getSessionStatus(sessionId: String) = withContext(Dispatchers.IO) {
+        try {
+            val response = api.getSessionStatus(sessionId)
+            if (response.isSuccessful) {
+                Result.success(response.body()?.data?.status)
+            } else {
+                Result.failure(Exception("Failed to get session status: ${response.code()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Called by RECEIVER when its accelerometer detects a physical tap.
+     * Posts the tap event to the backend so the sender can poll for it.
+     */
+    suspend fun reportTap(
+        receiverDeviceId: String,
+        senderDeviceId: String,
+        accelPeakMs2: Double,
+        rssi: Int
+    ) = withContext(Dispatchers.IO) {
+        try {
+            val request = TapEventRequest(
+                receiverDeviceId = receiverDeviceId,
+                senderDeviceId = senderDeviceId,
+                accelPeakMs2 = accelPeakMs2,
+                rssi = rssi,
+                tapTimestamp = java.time.Instant.now().toString()
+            )
+            val response = api.reportTapEvent(request)
+            if (response.isSuccessful) {
+                Result.success(response.body()?.data?.tapEventId)
+            } else {
+                Result.failure(Exception("Failed to report tap: ${response.code()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Called by SENDER every ~300ms while in ARMED state.
+     * Returns true when the backend has a fresh tap event from the receiver.
+     */
+    suspend fun pollTapStatus(senderDeviceId: String, receiverDeviceId: String) = withContext(Dispatchers.IO) {
+        try {
+            val response = api.pollTapStatus(senderDeviceId, receiverDeviceId)
+            if (response.isSuccessful) {
+                Result.success(response.body()?.data?.confirmed ?: false)
+            } else {
+                Result.failure(Exception("Tap poll failed: ${response.code()}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 }

@@ -137,3 +137,64 @@ export async function getHistoryController(
     next(error);
   }
 }
+
+export async function commitTransactionController(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const input = req.body as import('./transaction.schemas').CommitTransactionInput;
+    const authReq = req as AuthenticatedRequest;
+
+    const result = await transactionService.commitTransaction(
+      input,
+      authReq.user.sub,
+      authReq.user.deviceId,
+      authReq.correlationId,
+    );
+
+    const response: ApiResponse<typeof result> = {
+      success: true,
+      data: result,
+      meta: {
+        timestamp: new Date().toISOString(),
+        correlationId: authReq.correlationId,
+      },
+    };
+
+    res.status(200).json(response);
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function reverseTransactionController(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const input = req.body as import('./transaction.schemas').ReverseTransactionInput;
+    const authReq = req as AuthenticatedRequest;
+
+    const result = await transactionService.reverseTransaction(
+      input.idempotencyKey,
+      authReq.user.sub,
+      authReq.correlationId,
+    );
+
+    const response: ApiResponse<typeof result> = {
+      success: true,
+      data: result,
+      meta: {
+        timestamp: new Date().toISOString(),
+        correlationId: authReq.correlationId,
+      },
+    };
+
+    res.status(200).json(response);
+  } catch (error) {
+    next(error);
+  }
+}

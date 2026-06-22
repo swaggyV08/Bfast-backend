@@ -33,3 +33,18 @@ export const transactionHistorySchema = z.object({
 export type CreateTransactionInput = z.infer<typeof createTransactionSchema>;
 export type RelayTransactionInput = z.infer<typeof relayTransactionSchema>;
 export type TransactionHistoryInput = z.infer<typeof transactionHistorySchema>;
+
+export const commitTransactionSchema = z.object({
+  correlationId: z.string().min(1, 'Correlation ID is required'),
+  idempotencyKey: z.string().min(1, 'Idempotency Key is required'),
+  receiverDeviceId: z.string().min(1, 'Receiver Device ID is required'),
+  amountPaise: z.number().int().positive('Amount must be positive'),
+});
+
+export const reverseTransactionSchema = z.object({
+  idempotencyKey: z.string().min(1, 'Idempotency Key is required'),
+  reason: z.string().optional(),
+});
+
+export type CommitTransactionInput = z.infer<typeof commitTransactionSchema>;
+export type ReverseTransactionInput = z.infer<typeof reverseTransactionSchema>;

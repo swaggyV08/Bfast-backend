@@ -64,14 +64,34 @@ class PaymentViewModel @Inject constructor(
                 // The backend will do the final balance validation
             }
 
-            val result = paymentRepository.processPayment(targetDeviceId, targetName, amountPaise)
-            result.onSuccess {
-                // Trigger offline BLE payment broadcast so receiver instantly knows
-                com.bfast.app.core.hardware.SensorForegroundService.advertisePayment(amountPaise)
-                _paymentState.value = PaymentState.Success(amountPaise)
-            }.onFailure {
+            // ── The Commit Gate (Sensors Propose, Server Disposes) ──
+            try {
+                // 1. Correlate the session
+                // val correlationRes = paymentCommitClient.correlateTap(...)
+                // For now, we simulate the server correlation result:
+                val isReceiverOffline = false // TODO: Read from actual CorrelationResponse
+                
+                if (isReceiverOffline) {
+                    _paymentState.value = PaymentState.Error(
+                        "Receiver is offline. Ask them to open the BFast app."
+                    )
+                    return@launch
+                }
+
+                // 2. Idempotent Commit
+                val result = paymentRepository.processPayment(targetDeviceId, targetName, amountPaise)
+                result.onSuccess {
+                    // Trigger offline BLE payment broadcast so receiver instantly knows
+                    com.bfast.app.core.hardware.SensorForegroundService.advertisePayment(amountPaise)
+                    _paymentState.value = PaymentState.Success(amountPaise)
+                }.onFailure {
+                    _paymentState.value = PaymentState.Error(
+                        it.message ?: "Payment failed. Please check your connection and try again."
+                    )
+                }
+            } catch (e: Exception) {
                 _paymentState.value = PaymentState.Error(
-                    it.message ?: "Payment failed. Please check your connection and try again."
+                    "Network error during payment correlation."
                 )
             }
         }
@@ -83,11 +103,36 @@ class PaymentViewModel @Inject constructor(
     private val _matchedName = MutableStateFlow<String?>(null)
     val matchedName: StateFlow<String?> = _matchedName.asStateFlow()
 
+    // Nearby receiver detected via BLE proximity (before tap)
+    private val _nearbyReceiverDeviceId = MutableStateFlow<String?>(null)
+    val nearbyReceiverDeviceId: StateFlow<String?> = _nearbyReceiverDeviceId.asStateFlow()
+
+    private val _nearbyReceiverName = MutableStateFlow<String?>(null)
+    val nearbyReceiverName: StateFlow<String?> = _nearbyReceiverName.asStateFlow()
+
+    // Tap confirmed by ConfidenceEngine (physical tap detected)
+    val tapConfirmedForPayment: StateFlow<Boolean> =
+        com.bfast.app.core.hardware.SensorForegroundService.tapConfirmedForPayment
+
+    // Handshake state for UI
+    val handshakeState: StateFlow<com.bfast.app.core.hardware.HandshakeState> =
+        com.bfast.app.core.hardware.SensorForegroundService.handshakeState
+
     fun startSenderMode() {
         com.bfast.app.core.hardware.SensorForegroundService.resetHandshakeState()
         com.bfast.app.core.hardware.SensorForegroundService.isSenderMode.value = true
         
-        // Observe matches from SensorForegroundService
+        // Observe nearby receiver from BLE proximity (before tap)
+        viewModelScope.launch {
+            com.bfast.app.core.hardware.SensorForegroundService.nearbyReceiver.collect { receiver ->
+                if (receiver != null) {
+                    _nearbyReceiverDeviceId.value = receiver.deviceId
+                    _nearbyReceiverName.value = receiver.displayName
+                }
+            }
+        }
+
+        // Observe matches from SensorForegroundService (after tap confirmation)
         viewModelScope.launch {
             com.bfast.app.core.hardware.SensorForegroundService.outgoingPaymentMatch.collect { match ->
                 if (match != null) {
@@ -103,6 +148,14 @@ class PaymentViewModel @Inject constructor(
         com.bfast.app.core.hardware.SensorForegroundService.resetHandshakeState()
         _matchedDeviceId.value = null
         _matchedName.value = null
+        _nearbyReceiverDeviceId.value = null
+        _nearbyReceiverName.value = null
+    }
+
+    fun clearNearbyReceiver() {
+        _nearbyReceiverDeviceId.value = null
+        _nearbyReceiverName.value = null
+        com.bfast.app.core.hardware.SensorForegroundService.clearOutgoingMatch()
     }
 
     fun resetState() {

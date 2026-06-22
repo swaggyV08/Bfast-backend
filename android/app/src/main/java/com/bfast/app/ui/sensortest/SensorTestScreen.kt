@@ -1,5 +1,7 @@
 package com.bfast.app.ui.sensortest
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
@@ -11,8 +13,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -25,6 +27,8 @@ import kotlin.math.sqrt
 val CyanColor = Color(0xFF00E5FF)
 val PurpleColor = Color(0xFFAA00FF)
 val BlueColor = Color(0xFF2979FF)
+val GreenColor = Color(0xFF00E676)
+val OrangeColor = Color(0xFFFF9100)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -35,32 +39,63 @@ fun SensorTestScreen(
     val isRecording by viewModel.isRecording.collectAsState()
     val eventLogs by viewModel.eventLogs.collectAsState()
     val deviceId by viewModel.deviceId.collectAsState()
-    val sensorData by SensorForegroundService.sensorData.collectAsState()
-    val tapEvents by SensorForegroundService.tapEvents.collectAsState()
-
     val apiConnected by viewModel.apiConnected.collectAsState()
     val isSenderRole by viewModel.isSenderRole.collectAsState()
 
-    // Freeze readings unless started or just tapped
-    var frozenData by remember { mutableStateOf(sensorData) }
-    var readingCount by remember { mutableStateOf(0) }
+    // 10 Hz sampled live sensor readings — avoids recomposing at sensor rate (100 Hz)
+    var liveData by remember { mutableStateOf<SensorForegroundService.SensorData?>(null) }
+    var liveImpulse by remember { mutableStateOf(0.0) }
+    var liveGyroMag by remember { mutableStateOf(0.0) }
 
-    LaunchedEffect(sensorData) {
-        if (isRecording) {
-            frozenData = sensorData
-            readingCount++
-            // Auto stop after 5 consecutive readings for accurate capture
-            if (readingCount >= 5) {
-                viewModel.stopRecording()
-                readingCount = 0
+    // Peak values — held until next session start
+    var peakImpulse by remember { mutableStateOf(0.0) }
+    var peakGyro by remember { mutableStateOf(0.0) }
+    var peakFlash by remember { mutableStateOf(false) }
+
+    // Tap-flash animation
+    val flashColor by animateColorAsState(
+        targetValue = if (peakFlash) GreenColor else Color.Transparent,
+        animationSpec = tween(durationMillis = 300),
+        label = "tapFlash"
+    )
+
+    LaunchedEffect(isRecording) {
+        if (!isRecording) return@LaunchedEffect
+        peakImpulse = 0.0
+        peakGyro = 0.0
+        while (isRecording) {
+            liveData = SensorForegroundService.sensorData.value
+            liveImpulse = SensorForegroundService.liveImpulse.value
+            liveGyroMag = SensorForegroundService.liveGyroMag.value
+
+            // Read peak values from TapDetector
+            val td = SensorForegroundService.instance?.tapDetector
+            val newPeak = td?.lastPeakAccel ?: 0.0
+            val newGyro = td?.lastGyro ?: 0.0
+            if (newPeak > peakImpulse) {
+                peakImpulse = newPeak
+                peakGyro = newGyro
+                peakFlash = true
+                kotlinx.coroutines.delay(300)
+                peakFlash = false
             }
+            kotlinx.coroutines.delay(100) // 10 Hz
         }
     }
 
-    // Unfreeze for a single reading if a manual tap is detected
+    val accelX = liveData?.accelX ?: 0f
+    val accelY = liveData?.accelY ?: 0f
+    val accelZ = liveData?.accelZ ?: 0f
+    val gyroX = liveData?.gyroX ?: 0f
+    val gyroY = liveData?.gyroY ?: 0f
+    val gyroZ = liveData?.gyroZ ?: 0f
+    val accelMag = sqrt((accelX * accelX + accelY * accelY + accelZ * accelZ).toDouble())
+
+    val tapEvents by SensorForegroundService.tapEvents.collectAsState()
     LaunchedEffect(tapEvents) {
-        if (tapEvents != null && tapEvents!! > 0f) {
-            frozenData = sensorData
+        val conf = tapEvents
+        if (conf != null && conf > 0f) {
+            viewModel.addLog("[TAP] Detected — confidence: ${"%.2f".format(conf)}", "Success")
         }
     }
 
@@ -68,21 +103,32 @@ fun SensorTestScreen(
         containerColor = BackgroundDark,
         topBar = {
             Column(
-                modifier = Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 16.dp, bottom = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(onClick = onNavigateBack) {
+                    IconButton(onClick = { viewModel.stopRecording(); onNavigateBack() }) {
                         Text("←", color = Color.White, fontSize = 24.sp)
                     }
                     Spacer(modifier = Modifier.weight(1f))
-                    Text("⚡ BFast Sensor Test", color = BlueColor, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        "⚡ Sensor Test",
+                        color = BlueColor,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold
+                    )
                     Spacer(modifier = Modifier.weight(1.5f))
                 }
-                Text("Tap your phone to test accelerometer + gyroscope bump detection", color = TextSecondaryDark, fontSize = 12.sp)
+                Text(
+                    "Live accel + gyro + tap impulse readings",
+                    color = TextSecondaryDark,
+                    fontSize = 12.sp
+                )
             }
         }
     ) { padding ->
@@ -91,76 +137,146 @@ fun SensorTestScreen(
                 .fillMaxSize()
                 .padding(padding)
                 .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            // ── Status row ─────────────────────────────────────────────────
             item {
-                SectionCard(title = "📡 SENSOR STATUS") {
+                SectionCard(title = "STATUS") {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         StatusPill("Accel: On", true)
-                        StatusPill("Gyro: On", true)
-                        StatusPill(if (apiConnected) "API: Connected" else "API: Not connected", apiConnected)
+                        StatusPill("Gyro: ${if (isRecording) "On" else "Off"}", isRecording)
+                        StatusPill("API: ${if (apiConnected) "OK" else "–"}", apiConnected)
+                        StatusPill(if (isRecording) "LIVE" else "IDLE", isRecording)
                     }
                 }
             }
 
+            // ── Accelerometer card ──────────────────────────────────────────
             item {
-                SectionCard(title = "📊 LIVE SENSOR READINGS") {
-                    val data = frozenData
-                    val accelX = data?.accelX ?: 0f
-                    val accelY = data?.accelY ?: 0f
-                    val accelZ = data?.accelZ ?: 0f
-                    val gyroX = data?.gyroX ?: 0f
-                    val gyroY = data?.gyroY ?: 0f
-                    val gyroZ = data?.gyroZ ?: 0f
-
-                    val accelMag = sqrt(accelX*accelX + accelY*accelY + accelZ*accelZ)
-                    val gyroMag = sqrt(gyroX*gyroX + gyroY*gyroY + gyroZ*gyroZ)
-
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                        ReadingColumn("Accel X", accelX, PurpleColor, "Gyro X", gyroX, CyanColor)
-                        ReadingColumn("Accel Y", accelY, BlueColor, "Gyro Y", gyroY, CyanColor)
-                        ReadingColumn("Accel Z", accelZ, PurpleColor, "Gyro Z", gyroZ, CyanColor)
+                SectionCard(title = "ACCELEROMETER  (m/s²)") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        AxisReading("X", accelX, PurpleColor)
+                        AxisReading("Y", accelY, BlueColor)
+                        AxisReading("Z", accelZ, PurpleColor)
+                        AxisReading("|a|", accelMag.toFloat(), OrangeColor)
                     }
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Magnitude", color = TextSecondaryDark, fontSize = 10.sp)
-                        Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                            Text("|a| = ${"%.2f".format(accelMag)}", color = PurpleColor, fontWeight = FontWeight.Bold)
-                            Text("|w| = ${"%.2f".format(gyroMag)}", color = CyanColor, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            // ── Gyroscope card ──────────────────────────────────────────────
+            item {
+                SectionCard(title = "GYROSCOPE  (rad/s)") {
+                    if (!isRecording) {
+                        Text(
+                            "Press START to enable gyroscope readings",
+                            color = TextSecondaryDark,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(vertical = 4.dp)
+                        )
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            AxisReading("X", gyroX, CyanColor)
+                            AxisReading("Y", gyroY, CyanColor)
+                            AxisReading("Z", gyroZ, CyanColor)
+                            AxisReading("|ω|", liveGyroMag.toFloat(), GreenColor)
                         }
                     }
                 }
             }
 
+            // ── Live impulse + Peak tap ─────────────────────────────────────
             item {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(120.dp)
-                        .border(1.dp, TextSecondaryDark.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
-                        .background(SurfaceDark, RoundedCornerShape(12.dp)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("👆", fontSize = 32.sp)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text("Tap or bump your phone to detect", color = TextSecondaryDark, fontSize = 14.sp)
+                SectionCard(title = "TAP IMPULSE") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceAround
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("LIVE IMPULSE", color = TextSecondaryDark, fontSize = 10.sp)
+                            Text(
+                                "${"%.3f".format(liveImpulse)} m/s²",
+                                color = if (liveImpulse > 0.5) OrangeColor else Color.White,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("PEAK TAP", color = TextSecondaryDark, fontSize = 10.sp)
+                            Text(
+                                "${"%.3f".format(peakImpulse)} m/s²",
+                                color = flashColor.takeIf { peakFlash } ?: if (peakImpulse > 1.0) GreenColor else Color.White,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("PEAK GYRO", color = TextSecondaryDark, fontSize = 10.sp)
+                            Text(
+                                "${"%.3f".format(peakGyro)} rad/s",
+                                color = CyanColor,
+                                fontSize = 20.sp,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
                     }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    // Impulse bar
+                    val clampedImpulse = (liveImpulse / 5.0).coerceIn(0.0, 1.0).toFloat()
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(10.dp)
+                            .background(SurfaceDark, RoundedCornerShape(5.dp))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(clampedImpulse)
+                                .height(10.dp)
+                                .background(
+                                    when {
+                                        clampedImpulse > 0.6f -> GreenColor
+                                        clampedImpulse > 0.2f -> OrangeColor
+                                        else -> BlueColor
+                                    },
+                                    RoundedCornerShape(5.dp)
+                                )
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        if (!isRecording) "START sensors and tap your phone to see readings"
+                        else if (peakImpulse == 0.0) "Tap your phone now..."
+                        else "Last tap: ${"%.3f".format(peakImpulse)} m/s²  |  gyro: ${"%.3f".format(peakGyro)} rad/s",
+                        color = TextSecondaryDark,
+                        fontSize = 11.sp
+                    )
                 }
             }
 
+            // ── Config ─────────────────────────────────────────────────────
             item {
-                SectionCard(title = "⚙ CONFIGURATION") {
-                    ConfigRow("Backend URL", "http://192.168.0.147:3000")
+                SectionCard(title = "CONFIGURATION") {
                     ConfigRow("Device ID", deviceId)
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text("Role", color = TextSecondaryDark, fontSize = 12.sp)
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(if (isSenderRole) "Sender" else "Receiver", color = Color.White, fontSize = 12.sp)
+                            Text(
+                                if (isSenderRole) "Sender" else "Receiver",
+                                color = Color.White,
+                                fontSize = 12.sp
+                            )
                             Spacer(modifier = Modifier.width(8.dp))
                             Button(
                                 onClick = { viewModel.toggleRole() },
@@ -172,33 +288,41 @@ fun SensorTestScreen(
                             }
                         }
                     }
-                    ConfigRow("Tap Threshold (m/s²)", "4.0")
+                    ConfigRow("Tap threshold ceiling", "1.0 m/s²")
+                    ConfigRow("Proximity (arm)", "0–5 cm  (proxScore ≥ 30, RSSI ≥ -75)")
                 }
             }
 
+            // ── Controls ───────────────────────────────────────────────────
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = { viewModel.toggleRecording() },
-                        modifier = Modifier.fillMaxWidth().height(48.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = PurpleColor),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isRecording) Color(0xFFB71C1C) else PurpleColor
+                        ),
                         shape = RoundedCornerShape(8.dp)
                     ) {
-                        Text(if (isRecording) "■ Stop Sensors" else "▶ Start Sensors", color = Color.White, fontWeight = FontWeight.Bold)
-                    }
-                    Button(
-                        onClick = { viewModel.sendLastTap(tapEvents) },
-                        modifier = Modifier.fillMaxWidth().height(48.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00BFA5)), // Teal
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("📤 Send Last Tap as Bump", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text(
+                            if (isRecording) "■  STOP  (disables gyro)" else "▶  START  (enables gyro + tap detection)",
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
                     }
                     OutlinedButton(
                         onClick = { viewModel.testApiConnection() },
-                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondaryDark),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, TextSecondaryDark.copy(alpha = 0.3f)),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            TextSecondaryDark.copy(alpha = 0.3f)
+                        ),
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Text("🔌 Test API Connection")
@@ -206,29 +330,36 @@ fun SensorTestScreen(
                 }
             }
 
+            // ── Event log ──────────────────────────────────────────────────
             item {
-                SectionCard(title = "📋 EVENT LOG") {
+                SectionCard(title = "EVENT LOG") {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(150.dp)
+                            .height(160.dp)
                             .background(Color.Black, RoundedCornerShape(8.dp))
                             .padding(8.dp)
                     ) {
                         LazyColumn {
                             items(eventLogs) { log ->
                                 val color = when (log.colorType) {
-                                    "Success" -> Color(0xFF00E676)
+                                    "Success" -> GreenColor
                                     "Error" -> Color(0xFFFF5252)
                                     else -> TextSecondaryDark
                                 }
-                                Text(log.text, color = color, fontSize = 10.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                                Text(
+                                    log.text,
+                                    color = color,
+                                    fontSize = 10.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    lineHeight = 14.sp
+                                )
                             }
                         }
                     }
                 }
             }
-            
+
             item { Spacer(modifier = Modifier.height(32.dp)) }
         }
     }
@@ -237,8 +368,14 @@ fun SensorTestScreen(
 @Composable
 fun SectionCard(title: String, content: @Composable () -> Unit) {
     Column {
-        Text(title, color = TextSecondaryDark, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            title,
+            color = TextSecondaryDark,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp
+        )
+        Spacer(modifier = Modifier.height(6.dp))
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = SurfaceDark),
@@ -252,45 +389,54 @@ fun SectionCard(title: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-fun StatusPill(text: String, isOk: Boolean) {
-    Box(
-        modifier = Modifier
-            .background(
-                color = if (isOk) Color(0xFF1B5E20) else Color(0xFFB71C1C),
-                shape = RoundedCornerShape(16.dp)
-            )
-            .padding(horizontal = 12.dp, vertical = 4.dp)
-    ) {
-        Text(text, color = if (isOk) Color(0xFF81C784) else Color(0xFFE57373), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+fun AxisReading(axis: String, value: Float, color: Color) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(axis, color = TextSecondaryDark, fontSize = 11.sp)
+        Text(
+            "%+.2f".format(value),
+            color = color,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 
 @Composable
-fun ReadingColumn(titleA: String, valA: Float, colorA: Color, titleG: String, valG: Float, colorG: Color) {
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        Text(titleA, color = TextSecondaryDark, fontSize = 10.sp)
-        Text("%.2f".format(valA), color = colorA, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(titleG, color = TextSecondaryDark, fontSize = 10.sp)
-        Text("%.2f".format(valG), color = colorG, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+fun StatusPill(text: String, isOk: Boolean) {
+    Box(
+        modifier = Modifier
+            .background(
+                color = if (isOk) Color(0xFF1B5E20) else Color(0xFF37474F),
+                shape = RoundedCornerShape(16.dp)
+            )
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+    ) {
+        Text(
+            text,
+            color = if (isOk) Color(0xFF81C784) else TextSecondaryDark,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold
+        )
     }
 }
 
 @Composable
 fun ConfigRow(label: String, value: String) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(label, color = TextSecondaryDark, fontSize = 12.sp)
-        Box(
+        Text(
+            value,
+            color = Color.White,
+            fontSize = 11.sp,
             modifier = Modifier
                 .background(Color.Black.copy(alpha = 0.3f), RoundedCornerShape(4.dp))
-                .border(1.dp, TextSecondaryDark.copy(alpha = 0.2f), RoundedCornerShape(4.dp))
-                .padding(horizontal = 8.dp, vertical = 4.dp)
-        ) {
-            Text(value, color = Color.White, fontSize = 12.sp)
-        }
+                .padding(horizontal = 6.dp, vertical = 2.dp)
+        )
     }
 }

@@ -17,6 +17,9 @@ export const sensorReadingSchema = z.object({
 });
 
 export const batchSensorReadingsSchema = z.object({
+  sessionId: z.string().min(1, 'Session ID is required'),
+  role: z.enum(['sender', 'receiver']),
+  peerDeviceId: z.string().optional(), // Required if role is sender
   readings: z.array(sensorReadingSchema).max(1000, 'Max 1000 readings per batch'),
 });
 

@@ -28,10 +28,23 @@ interface BFastApi {
     @POST("bumps/receiver")
     suspend fun receiverBump(@Body request: ReceiverBumpRequest): Response<BumpResponse>
 
+    @GET("session/status/{sessionId}")
+    suspend fun getSessionStatus(@retrofit2.http.Path("sessionId") sessionId: String): Response<SessionStatusResponse>
+
     @GET("bumps/match/{matchId}")
     suspend fun getMatch(@retrofit2.http.Path("matchId") matchId: String): Response<MatchResponse>
 
-    // Add transaction endpoints later
+    // ── Tap event endpoints ─────────────────────────────────────────────────
+    // Receiver calls tap-event when its accelerometer detects a physical tap.
+    // Sender polls tap-poll every ~300ms to know when receiver confirmed the tap.
+    @POST("session/tap-event")
+    suspend fun reportTapEvent(@Body request: TapEventRequest): Response<TapEventResponse>
+
+    @GET("session/tap-poll")
+    suspend fun pollTapStatus(
+        @retrofit2.http.Query("senderDeviceId") senderDeviceId: String,
+        @retrofit2.http.Query("receiverDeviceId") receiverDeviceId: String
+    ): Response<TapPollResponse>
 }
 
 // --- DTOs ---
@@ -108,7 +121,19 @@ data class TransactionDto(
 )
 
 data class BatchSensorRequest(
+    val sessionId: String,
+    val role: String,
+    val peerDeviceId: String?,
     val readings: List<SensorReadingDto>
+)
+
+data class SessionStatusResponse(
+    val success: Boolean,
+    val data: SessionStatusData?
+)
+
+data class SessionStatusData(
+    val status: String
 )
 
 data class SensorReadingDto(
@@ -198,4 +223,32 @@ data class MatchData(
     val receiverAccelMs2: Double,
     val matchedAt: String,
     val consumed: Boolean
+)
+
+// ── Tap event DTOs ──────────────────────────────────────────────────────────
+
+data class TapEventRequest(
+    val receiverDeviceId: String,
+    val senderDeviceId: String,
+    val accelPeakMs2: Double,
+    val rssi: Int,
+    val tapTimestamp: String
+)
+
+data class TapEventResponse(
+    val success: Boolean,
+    val data: TapEventData?
+)
+
+data class TapEventData(
+    val tapEventId: String
+)
+
+data class TapPollResponse(
+    val success: Boolean,
+    val data: TapPollData?
+)
+
+data class TapPollData(
+    val confirmed: Boolean
 )

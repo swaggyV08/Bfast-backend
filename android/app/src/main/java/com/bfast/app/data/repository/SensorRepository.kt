@@ -13,9 +13,8 @@ class SensorRepository @Inject constructor(
     private val api: BFastApi,
     private val dataStoreManager: DataStoreManager
 ) {
-    suspend fun uploadSensorBatch(readings: List<SensorReadingDto>): Result<Unit> {
+    suspend fun uploadSensorBatch(request: BatchSensorRequest): Result<Unit> {
         return try {
-            val request = BatchSensorRequest(readings = readings)
             val response = api.uploadSensorBatch(request)
             if (response.isSuccessful && response.body()?.success == true) {
                 Result.success(Unit)

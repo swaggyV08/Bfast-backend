@@ -3,6 +3,18 @@ import { logger } from '@/shared/utils/logger';
 import * as sessionRepo from './session.repository';
 import { SessionCodeRow } from '@/shared/types';
 
+// ── In-memory tap event store ───────────────────────────────────────────────
+// key = "receiverDeviceId:senderDeviceId", TTL 5 seconds
+// Receiver POSTs here on tap. Sender polls here every 300ms.
+const TAP_EVENT_TTL_MS = 5000;
+
+interface TapEvent {
+  tapEventId: string;
+  timestamp: number;
+  accelPeakMs2: number;
+}
+const tapEventStore = new Map<string, TapEvent>();
+
 /**
  * Session service — business logic for BLE session code management.
  *
@@ -123,4 +135,121 @@ export async function getActiveSession(
   correlationId: string,
 ): Promise<SessionCodeRow | null> {
   return sessionRepo.getActiveSessionForDevice(receiverDeviceId, correlationId);
+}
+
+// ── Tap Event Endpoints ─────────────────────────────────────────────────────
+
+/**
+ * RECEIVER calls this immediately when its accelerometer detects a tap.
+ * Stores the event in memory so the sender can poll for it.
+ */
+export async function reportReceiverTap(
+  input: { receiverDeviceId: string; senderDeviceId: string; accelPeakMs2: number; rssi: number; tapTimestamp: string },
+  _userId: string,
+  correlationId: string,
+): Promise<{ tapEventId: string }> {
+  const key = `${input.receiverDeviceId}:${input.senderDeviceId}`;
+  const tapEventId = generateSecureRandom(8);
+
+  tapEventStore.set(key, {
+    tapEventId,
+    timestamp: Date.now(),
+    accelPeakMs2: input.accelPeakMs2,
+  });
+
+  // Auto-expire after TTL
+  setTimeout(() => tapEventStore.delete(key), TAP_EVENT_TTL_MS);
+
+  logger.info('Receiver tap event registered', {
+    correlationId,
+    key,
+    tapEventId,
+    accelPeakMs2: input.accelPeakMs2,
+    rssi: input.rssi,
+  });
+
+  return { tapEventId };
+}
+
+/**
+ * SENDER polls this ~every 300ms to know when the receiver has confirmed a tap.
+ * Returns confirmed=true if a fresh tap event exists for this device pair.
+ * Does NOT consume the event (TTL handles cleanup — idempotent within window).
+ */
+export async function pollTapStatus(
+  senderDeviceId: string,
+  receiverDeviceId: string,
+  correlationId: string,
+): Promise<{ confirmed: boolean }> {
+  const key = `${receiverDeviceId}:${senderDeviceId}`;
+  const event = tapEventStore.get(key);
+
+  if (!event) {
+    return { confirmed: false };
+  }
+
+  const age = Date.now() - event.timestamp;
+  if (age > TAP_EVENT_TTL_MS) {
+    tapEventStore.delete(key);
+    return { confirmed: false };
+  }
+
+  logger.debug('Tap poll: confirmed', { correlationId, key, ageMs: age });
+  return { confirmed: true };
+}
+
+/**
+ * Validates a Tap correlation intent from a Sender.
+ */
+export async function correlateTap(
+  input: {
+    sessionId: string;
+    senderDeviceId: string;
+    receiverDeviceId: string;
+    amountPaise: number;
+    rangingMethod: string;
+    reportedDistanceCm?: number | null;
+    senderRssiDb?: number | null;
+    receiverRssiDb?: number | null;
+  },
+  _userId: string,
+  requestCorrelationId: string
+): Promise<{ correlationId: string, status: string }> {
+  // Check if receiver has an active session matching the sessionId
+  const session = await sessionRepo.findActiveSessionByScId(input.sessionId, requestCorrelationId);
+  
+  if (!session) {
+    // If there is no active session matching this ID, the receiver is offline or the session expired.
+    return { correlationId: '', status: 'PEER_OFFLINE' };
+  }
+
+  if (session.receiver_device_id !== input.receiverDeviceId) {
+    return { correlationId: '', status: 'PEER_OFFLINE' };
+  }
+
+  // RSSI Spoof-Plausibility Check (Optional but recommended for legacy RSSI)
+  if (input.rangingMethod === 'RSSI' && input.senderRssiDb != null && input.receiverRssiDb != null) {
+    const diff = Math.abs(input.senderRssiDb - input.receiverRssiDb);
+    if (diff > 30) { // Unlikely that two devices touching have 30dBm difference
+      logger.warn('Spoof suspected: High RSSI variance', {
+        senderRssiDb: input.senderRssiDb,
+        receiverRssiDb: input.receiverRssiDb,
+        diff
+      });
+      return { correlationId: '', status: 'SPOOF_SUSPECTED' };
+    }
+  }
+
+  // Session is active and matches.
+  // We generate a correlationId that the client will use for the final commit.
+  const commitCorrelationId = generateSecureRandom(16);
+
+  logger.info('Tap correlated successfully', {
+    requestCorrelationId,
+    commitCorrelationId,
+    senderDeviceId: input.senderDeviceId,
+    receiverDeviceId: input.receiverDeviceId
+  });
+
+  return { correlationId: commitCorrelationId, status: 'MATCHED' };
 }

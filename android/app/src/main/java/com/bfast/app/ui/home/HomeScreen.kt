@@ -11,8 +11,6 @@ import android.net.NetworkCapabilities
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -39,7 +37,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.bfast.app.core.hardware.DetectionMode
 import com.bfast.app.core.hardware.SensorForegroundService
 import com.bfast.app.data.local.db.TransactionEntity
 import com.bfast.app.ui.theme.BackgroundNavy
@@ -63,8 +60,8 @@ fun HomeScreen(
     val transactions by viewModel.transactions.collectAsState()
     val displayName by viewModel.displayName.collectAsState()
     val paymentReceivedEvent by SensorForegroundService.paymentReceivedEvent.collectAsState()
+    val incomingPaymentRequest by SensorForegroundService.incomingPaymentRequest.collectAsState()
     val receivedSuccessMessage by viewModel.receivedSuccessMessage.collectAsState()
-    val detectionMode by SensorForegroundService.detectionMode.collectAsState()
 
     fun startSensorServiceIfPermitted() {
         try {
@@ -109,7 +106,6 @@ fun HomeScreen(
     var isBluetoothOn by remember { mutableStateOf(true) }
     var isInternetOn by remember { mutableStateOf(true) }
 
-    // Check status periodically
     LaunchedEffect(Unit) {
         viewModel.loadData()
         while (true) {
@@ -154,9 +150,6 @@ fun HomeScreen(
         permissionLauncher.launch(permissions.toTypedArray())
     }
 
-    // UWB error snackbar
-    var showUwbError by remember { mutableStateOf<String?>(null) }
-
     Scaffold(
         containerColor = BackgroundNavy
     ) { padding ->
@@ -165,32 +158,6 @@ fun HomeScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // ── Detection Mode Toggle ───────────────────────────────────
-            DetectionModeToggle(
-                currentMode = detectionMode,
-                onModeChange = { newMode ->
-                    val error = SensorForegroundService.setDetectionMode(newMode)
-                    if (error != null) {
-                        showUwbError = error
-                    } else {
-                        viewModel.saveDetectionMode(newMode.name)
-                    }
-                }
-            )
-
-            // UWB Error Banner
-            if (showUwbError != null) {
-                StatusBanner(
-                    text = showUwbError!!,
-                    backgroundColor = Color(0xFFFF9800).copy(alpha = 0.9f),
-                    icon = Icons.Default.Info
-                )
-                // Auto-dismiss after 5 seconds
-                LaunchedEffect(showUwbError) {
-                    kotlinx.coroutines.delay(5000)
-                    showUwbError = null
-                }
-            }
 
             // Bluetooth OFF banner
             if (!isBluetoothOn) {
@@ -205,6 +172,15 @@ fun HomeScreen(
                 StatusBanner(
                     text = "No Internet connection — Wallet sync is paused. Your balance may not be up to date.",
                     backgroundColor = Color(0xFFFF9800).copy(alpha = 0.9f)
+                )
+            }
+
+            // "Tap Detected" — incoming payment is being processed
+            if (incomingPaymentRequest != null && receivedSuccessMessage == null) {
+                StatusBanner(
+                    text = "Tap detected! Waiting for payment from ${incomingPaymentRequest!!.displayName.ifBlank { "sender" }}...",
+                    backgroundColor = PrimaryBlue.copy(alpha = 0.9f),
+                    icon = Icons.Default.Info
                 )
             }
 
@@ -434,82 +410,7 @@ fun HomeScreen(
     }
 }
 
-// ── Detection Mode Toggle (Segmented Control) ──────────────────────────────
 
-@Composable
-fun DetectionModeToggle(
-    currentMode: DetectionMode,
-    onModeChange: (DetectionMode) -> Unit
-) {
-    val isAccelMode = currentMode == DetectionMode.ACCEL_GYRO_BLE
-
-    val accelBgColor by animateColorAsState(
-        targetValue = if (isAccelMode) PrimaryBlue else Color.Transparent,
-        animationSpec = tween(300),
-        label = "accelBg"
-    )
-    val uwbBgColor by animateColorAsState(
-        targetValue = if (!isAccelMode) PrimaryBlue else Color.Transparent,
-        animationSpec = tween(300),
-        label = "uwbBg"
-    )
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 24.dp, vertical = 12.dp)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(44.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(SurfaceDark.copy(alpha = 0.6f))
-                .border(1.dp, TextSecondaryDark.copy(alpha = 0.3f), RoundedCornerShape(22.dp)),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Accel + Gyro + BLE option
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .padding(3.dp)
-                    .clip(RoundedCornerShape(19.dp))
-                    .background(accelBgColor)
-                    .clickable { onModeChange(DetectionMode.ACCEL_GYRO_BLE) },
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "Accel+Gyro+BLE",
-                    color = if (isAccelMode) Color.White else TextSecondaryDark,
-                    fontSize = 13.sp,
-                    fontWeight = if (isAccelMode) FontWeight.SemiBold else FontWeight.Normal,
-                    textAlign = TextAlign.Center
-                )
-            }
-
-            // UWB + BLE option
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .padding(3.dp)
-                    .clip(RoundedCornerShape(19.dp))
-                    .background(uwbBgColor)
-                    .clickable { onModeChange(DetectionMode.UWB_BLE) },
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "UWB+BLE",
-                    color = if (!isAccelMode) Color.White else TextSecondaryDark,
-                    fontSize = 13.sp,
-                    fontWeight = if (!isAccelMode) FontWeight.SemiBold else FontWeight.Normal,
-                    textAlign = TextAlign.Center
-                )
-            }
-        }
-    }
-}
 
 // ── Shared Components ───────────────────────────────────────────────────────
 
@@ -517,12 +418,14 @@ fun DetectionModeToggle(
 fun StatusBanner(
     text: String,
     backgroundColor: Color,
-    icon: androidx.compose.ui.graphics.vector.ImageVector = Icons.Default.Warning
+    icon: androidx.compose.ui.graphics.vector.ImageVector = Icons.Default.Warning,
+    onClick: (() -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .background(backgroundColor)
+            .then(if (onClick != null) Modifier.clickable { onClick() } else Modifier)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
