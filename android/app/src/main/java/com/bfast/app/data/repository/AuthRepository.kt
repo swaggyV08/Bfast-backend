@@ -63,15 +63,24 @@ class AuthRepository @Inject constructor(
                 val errorMessage = parseHttpError(response.code(), "registration")
                 Result.failure(Exception(errorMessage))
             }
+        } catch (e: java.net.ConnectException) {
+            Result.failure(Exception(
+                "Cannot connect to the BFast server. Make sure your phone is on the same " +
+                "WiFi network as the server (not mobile data) and try again."
+            ))
         } catch (e: java.net.UnknownHostException) {
             Result.failure(Exception(
-                "Cannot reach BFast servers. Please check your internet connection " +
-                "(WiFi or mobile data) and try again."
+                "Cannot reach BFast servers. Make sure your phone is connected to WiFi, " +
+                "not mobile data."
             ))
         } catch (e: java.net.SocketTimeoutException) {
+            val isConnectTimeout = e.message?.contains("connect", ignoreCase = true) == true
             Result.failure(Exception(
-                "The connection timed out. This usually means your internet is slow. " +
-                "Please try again in a moment or switch to a better network."
+                if (isConnectTimeout)
+                    "Could not reach the BFast server. Make sure your phone and the server " +
+                    "are on the same WiFi network and the server is running."
+                else
+                    "The server took too long to respond. Please try again."
             ))
         } catch (e: Exception) {
             Result.failure(Exception(
@@ -108,15 +117,24 @@ class AuthRepository @Inject constructor(
                 val errorMessage = parseHttpError(response.code(), "login")
                 Result.failure(Exception(errorMessage))
             }
+        } catch (e: java.net.ConnectException) {
+            Result.failure(Exception(
+                "Cannot connect to the BFast server. Make sure your phone is on the same " +
+                "WiFi network as the server (not mobile data) and try again."
+            ))
         } catch (e: java.net.UnknownHostException) {
             Result.failure(Exception(
-                "Cannot reach BFast servers. Please check your internet connection " +
-                "(WiFi or mobile data) and try again."
+                "Cannot reach BFast servers. Make sure your phone is connected to WiFi, " +
+                "not mobile data."
             ))
         } catch (e: java.net.SocketTimeoutException) {
+            val isConnectTimeout = e.message?.contains("connect", ignoreCase = true) == true
             Result.failure(Exception(
-                "The connection timed out. This usually means your internet is slow. " +
-                "Please try again in a moment or switch to a better network."
+                if (isConnectTimeout)
+                    "Could not reach the BFast server. Make sure your phone and the server " +
+                    "are on the same WiFi network and the server is running."
+                else
+                    "The server took too long to respond. Please try again."
             ))
         } catch (e: Exception) {
             Result.failure(Exception(

@@ -2,8 +2,12 @@ package com.bfast.app.ui.payment
 
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
@@ -19,28 +23,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.bfast.app.core.hardware.DiscoveredDevice
 import com.bfast.app.core.hardware.SensorForegroundService
 import com.bfast.app.ui.theme.PrimaryBlue
 import com.bfast.app.ui.theme.TextSecondaryDark
 
-/**
- * Tap Detection Screen — Pure Scanning UI.
- *
- * This screen shows ONLY a scanning animation + "Tap to Pay" instruction.
- * It does NOT show any receiver name, receiver card, or receiver details.
- *
- * The receiver is discovered silently in the background. The user's only
- * interaction is physically tapping their phone on the receiver's device.
- *
- * When a tap is confirmed by the ConfidenceEngine (score ≥ 70),
- * the screen navigates directly to PaymentEntryScreen with the
- * receiver's identity resolved at that moment.
- *
- * This matches the NFC UX:
- *   1. Open "Pay" → see scanning animation
- *   2. Tap phones together
- *   3. Payment screen appears with receiver's name
- */
 @Composable
 fun TapDetectionScreen(
     onNavigateBack: () -> Unit,
@@ -48,85 +35,62 @@ fun TapDetectionScreen(
     viewModel: PaymentViewModel = hiltViewModel()
 ) {
     val tapConfirmed by viewModel.tapConfirmedForPayment.collectAsState()
-    val nearbyDeviceId by viewModel.nearbyReceiverDeviceId.collectAsState()
-    val nearbyName by viewModel.nearbyReceiverName.collectAsState()
+    // Read nearbyReceivers directly from SensorForegroundService to avoid
+    // the async ViewModel collection lag that caused the race condition.
+    val nearbyReceivers by SensorForegroundService.nearbyReceivers.collectAsState()
 
-    // Track whether we've already navigated to prevent double-navigation
     var hasNavigated by remember { mutableStateOf(false) }
+    var selectedReceiver by remember { mutableStateOf<DiscoveredDevice?>(null) }
 
     LaunchedEffect(Unit) {
         hasNavigated = false
+        selectedReceiver = null
         viewModel.startSenderMode()
     }
 
     DisposableEffect(Unit) {
-        onDispose {
-            viewModel.clearNearbyReceiver()
-        }
+        onDispose { viewModel.clearNearbyReceiver() }
     }
 
-    // Navigate to PaymentEntryScreen ONLY when a physical tap is confirmed
+    // Fix: read receiver identity directly from SensorForegroundService at the moment
+    // of navigation — avoids the race where nearbyDeviceId was null in the ViewModel.
     LaunchedEffect(tapConfirmed) {
-        if (tapConfirmed && !hasNavigated && nearbyDeviceId != null) {
-            hasNavigated = true
-            onNavigateToPayment(
-                nearbyDeviceId!!,
-                nearbyName ?: "Unknown User"
-            )
+        if (tapConfirmed && !hasNavigated) {
+            val receiver = SensorForegroundService.nearbyReceiver.value
+                ?: SensorForegroundService.outgoingPaymentMatch.value
+            if (receiver != null) {
+                hasNavigated = true
+                onNavigateToPayment(receiver.deviceId, receiver.displayName)
+            }
         }
     }
 
     // ── Animations ──────────────────────────────────────────────────────────
     val infiniteTransition = rememberInfiniteTransition(label = "scan_pulse")
 
-    // Outer pulse ring
     val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.8f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart
-        ),
+        initialValue = 1f, targetValue = 1.8f,
+        animationSpec = infiniteRepeatable(tween(1500, easing = FastOutSlowInEasing), RepeatMode.Restart),
         label = "pulse_scale"
     )
     val pulseAlpha by infiniteTransition.animateFloat(
-        initialValue = 0.5f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart
-        ),
+        initialValue = 0.5f, targetValue = 0f,
+        animationSpec = infiniteRepeatable(tween(1500, easing = FastOutSlowInEasing), RepeatMode.Restart),
         label = "pulse_alpha"
     )
-
-    // Second pulse ring (offset timing for layered effect)
     val pulseScale2 by infiniteTransition.animateFloat(
-        initialValue = 1f,
-        targetValue = 1.5f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, 400, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart
-        ),
+        initialValue = 1f, targetValue = 1.5f,
+        animationSpec = infiniteRepeatable(tween(1500, 400, FastOutSlowInEasing), RepeatMode.Restart),
         label = "pulse_scale2"
     )
     val pulseAlpha2 by infiniteTransition.animateFloat(
-        initialValue = 0.4f,
-        targetValue = 0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1500, 400, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Restart
-        ),
+        initialValue = 0.4f, targetValue = 0f,
+        animationSpec = infiniteRepeatable(tween(1500, 400, FastOutSlowInEasing), RepeatMode.Restart),
         label = "pulse_alpha2"
     )
-
-    // Tap icon gentle bounce
     val tapBounce by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = -6f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(700, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
+        initialValue = 0f, targetValue = -6f,
+        animationSpec = infiniteRepeatable(tween(700, easing = FastOutSlowInEasing), RepeatMode.Reverse),
         label = "tap_bounce"
     )
 
@@ -135,11 +99,7 @@ fun TapDetectionScreen(
             .fillMaxSize()
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFF0A0E21),
-                        Color(0xFF0D1B2A),
-                        Color(0xFF0A0E21)
-                    )
+                    colors = listOf(Color(0xFF0A0E21), Color(0xFF0D1B2A), Color(0xFF0A0E21))
                 )
             ),
         contentAlignment = Alignment.Center
@@ -151,15 +111,9 @@ fun TapDetectionScreen(
                 SensorForegroundService.resetHandshakeState()
                 onNavigateBack()
             },
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(16.dp)
+            modifier = Modifier.align(Alignment.TopStart).padding(16.dp)
         ) {
-            Icon(
-                Icons.Default.ArrowBack,
-                contentDescription = "Back",
-                tint = Color.White
-            )
+            Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
         }
 
         Column(
@@ -167,51 +121,30 @@ fun TapDetectionScreen(
             verticalArrangement = Arrangement.Center,
             modifier = Modifier.padding(horizontal = 32.dp)
         ) {
-            // ── Pulsing scan animation with layered rings ────────────────
+            // ── Pulsing scan animation ───────────────────────────────────
             Box(contentAlignment = Alignment.Center) {
-                // Outer pulse ring 1
                 Box(
-                    modifier = Modifier
-                        .size(180.dp)
-                        .scale(pulseScale)
-                        .clip(CircleShape)
+                    modifier = Modifier.size(180.dp).scale(pulseScale).clip(CircleShape)
                         .background(PrimaryBlue.copy(alpha = pulseAlpha * 0.25f))
                 )
-                // Outer pulse ring 2 (delayed)
                 Box(
-                    modifier = Modifier
-                        .size(180.dp)
-                        .scale(pulseScale2)
-                        .clip(CircleShape)
+                    modifier = Modifier.size(180.dp).scale(pulseScale2).clip(CircleShape)
                         .background(PrimaryBlue.copy(alpha = pulseAlpha2 * 0.2f))
                 )
-                // Inner static ring
                 Box(
-                    modifier = Modifier
-                        .size(120.dp)
-                        .clip(CircleShape)
+                    modifier = Modifier.size(120.dp).clip(CircleShape)
                         .background(PrimaryBlue.copy(alpha = 0.12f)),
                     contentAlignment = Alignment.Center
                 ) {
-                    // Tap icon with gentle bounce
-                    Text(
-                        text = "📱",
-                        fontSize = 44.sp,
-                        modifier = Modifier.offset(y = tapBounce.dp)
-                    )
+                    Text(text = "📱", fontSize = 44.sp, modifier = Modifier.offset(y = tapBounce.dp))
                 }
             }
 
-            Spacer(modifier = Modifier.height(48.dp))
+            Spacer(modifier = Modifier.height(32.dp))
 
-            Text(
-                text = "Ready to Pay",
-                color = Color.White,
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold
-            )
+            Text("Ready to Pay", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(12.dp))
 
             Text(
                 text = "Tap your phone on the\nreceiver's device to pay",
@@ -221,24 +154,117 @@ fun TapDetectionScreen(
                 lineHeight = 24.sp
             )
 
-            Spacer(modifier = Modifier.height(40.dp))
+            Spacer(modifier = Modifier.height(32.dp))
 
-            // Subtle scanning indicator
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
+            // ── Multiple receiver picker ─────────────────────────────────
+            when {
+                nearbyReceivers.size > 1 -> {
+                    // More than one receiver nearby — show a list to choose from
+                    Text(
+                        text = "${nearbyReceivers.size} receivers nearby — select one:",
+                        color = PrimaryBlue,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 200.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(nearbyReceivers) { device ->
+                            ReceiverListItem(
+                                device = device,
+                                isSelected = selectedReceiver?.deviceId == device.deviceId,
+                                onClick = {
+                                    selectedReceiver = device
+                                    // Lock the state machine onto this specific receiver
+                                    SensorForegroundService.nearbyReceiver.value?.let { current ->
+                                        if (current.deviceId != device.deviceId) {
+                                            SensorForegroundService.resetHandshakeState()
+                                        }
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+                nearbyReceivers.size == 1 -> {
+                    // Single receiver — show their name as a status
+                    val r = nearbyReceivers.first()
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = PrimaryBlue.copy(alpha = 0.15f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Text("📲", fontSize = 20.sp)
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(r.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                Text("Tap phones together to pay", color = TextSecondaryDark, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+                else -> {
+                    // No receiver detected yet — show scanning indicator
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = PrimaryBlue.copy(alpha = 0.5f),
+                            strokeWidth = 2.dp
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Scanning for receiver…",
+                            color = TextSecondaryDark.copy(alpha = 0.7f),
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReceiverListItem(
+    device: DiscoveredDevice,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = if (isSelected) PrimaryBlue.copy(alpha = 0.25f) else Color.White.copy(alpha = 0.06f),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier.size(36.dp).clip(CircleShape)
+                    .background(PrimaryBlue.copy(alpha = 0.2f)),
+                contentAlignment = Alignment.Center
             ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    color = PrimaryBlue.copy(alpha = 0.5f),
-                    strokeWidth = 2.dp
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = "Scanning nearby devices…",
-                    color = TextSecondaryDark.copy(alpha = 0.7f),
-                    fontSize = 12.sp
-                )
+                Text(device.displayName.take(1).uppercase(), color = PrimaryBlue, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(device.displayName, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text("Signal: ${device.rssi} dBm", color = TextSecondaryDark, fontSize = 11.sp)
+            }
+            if (isSelected) {
+                Text("✓", color = PrimaryBlue, fontSize = 18.sp, fontWeight = FontWeight.Bold)
             }
         }
     }

@@ -102,6 +102,12 @@ class BleManager(private val context: Context) {
     private val _closestDevice = MutableStateFlow<DiscoveredDevice?>(null)
     val closestDevice: StateFlow<DiscoveredDevice?> = _closestDevice
 
+    /** All receivers currently in detection range (proxScore ≥ 25), sorted by RSSI descending.
+     *  Used to show a picker when multiple receivers are nearby. */
+    private val nearbyReceiversMap = mutableMapOf<String, DiscoveredDevice>()
+    private val _nearbyReceivers = MutableStateFlow<List<DiscoveredDevice>>(emptyList())
+    val nearbyReceivers: StateFlow<List<DiscoveredDevice>> = _nearbyReceivers
+
     /** Raw RSSI for UI feedback. */
     private val _lastRssi = MutableStateFlow(Int.MIN_VALUE)
     val lastRssi: StateFlow<Int> = _lastRssi
@@ -273,7 +279,21 @@ class BleManager(private val context: Context) {
                             // "P" and "T" always pass through (payment + tap-confirmed
                             // events must never be silently dropped by proximity filter).
                             if (proxScore < 20f && command != "P" && command != "T") {
+                                nearbyReceiversMap.remove(deviceId)
+                                _nearbyReceivers.value = nearbyReceiversMap.values
+                                    .sortedByDescending { it.rssi }
                                 return@let
+                            }
+
+                            // ── Track all receivers in detection range (≥ 25) ────
+                            if (role == "RECEIVER" && proxScore >= 25f) {
+                                nearbyReceiversMap[deviceId] = device
+                                _nearbyReceivers.value = nearbyReceiversMap.values
+                                    .sortedByDescending { it.rssi }
+                            } else if (role == "RECEIVER") {
+                                nearbyReceiversMap.remove(deviceId)
+                                _nearbyReceivers.value = nearbyReceiversMap.values
+                                    .sortedByDescending { it.rssi }
                             }
 
                             // ── Keep the closest device (highest RSSI) ──────────
@@ -389,10 +409,15 @@ class BleManager(private val context: Context) {
         bestRssiInWindow = Int.MIN_VALUE
         bestDeviceInWindow = null
 
+        val now = System.currentTimeMillis()
+        // Evict stale entries from nearbyReceiversMap
+        nearbyReceiversMap.entries.removeAll { now - it.value.timestamp > DEVICE_TIMESTAMP_EXPIRY_MS }
+        _nearbyReceivers.value = nearbyReceiversMap.values.sortedByDescending { it.rssi }
+
         // Only clear closestDevice if it's stale (older than DEVICE_TIMESTAMP_EXPIRY_MS)
         val current = _closestDevice.value
         if (current != null) {
-            val age = System.currentTimeMillis() - current.timestamp
+            val age = now - current.timestamp
             if (age > DEVICE_TIMESTAMP_EXPIRY_MS) {
                 _closestDevice.value = null
                 _lastRssi.value = Int.MIN_VALUE
@@ -410,6 +435,8 @@ class BleManager(private val context: Context) {
         _closestDevice.value = null
         _lastRssi.value = Int.MIN_VALUE
         _remoteTapEvent.value = null
+        nearbyReceiversMap.clear()
+        _nearbyReceivers.value = emptyList()
         proximityEngine.reset()
         // Don't clear kalmanFilters — filter benefits from continuity for known devices
     }

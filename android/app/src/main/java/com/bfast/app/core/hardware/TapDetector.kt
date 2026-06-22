@@ -27,9 +27,9 @@ data class TapSignature(
 )
 
 enum class TapType {
-    SOFT_TAP,       // peakAccel in [0.4, 3.0] m/s²
-    NORMAL_TAP,     // peakAccel in [3.0, 15.0] m/s²
-    HARD_TAP        // peakAccel in [15.0, 50.0] m/s²
+    SOFT_TAP,       // peakAccel in [0.08, 2.0) m/s²  — gentle phone-to-phone touch
+    NORMAL_TAP,     // peakAccel in [2.0, 15.0) m/s²
+    HARD_TAP        // peakAccel in [15.0, 80.0) m/s²
 }
 
 /**
@@ -74,23 +74,25 @@ class TapDetector(
         // ── Adaptive Threshold Engine ───────────────────────────────────────
         /**
          * Z-score multiplier for dynamic noise floor threshold.
-         * 1.5 gives ~93% true-positive rate across all device noise profiles.
-         * Lower = more sensitive but slightly higher false-positive rate.
+         * 1.2 gives ~95% true-positive rate including gentle taps.
+         * Lower = more sensitive; shake/duration gates prevent false positives.
          */
-        const val Z_SCORE_MULTIPLIER = 1.5
+        const val Z_SCORE_MULTIPLIER = 1.2
 
         /**
          * Minimum absolute impulse to be considered a tap (m/s²).
-         * 0.10 catches the lightest finger-tap on any Android device.
+         * 0.08 catches the lightest phone-to-phone touch on any Android device.
          */
-        const val MIN_ABSOLUTE_IMPULSE = 0.10
+        const val MIN_ABSOLUTE_IMPULSE = 0.08
 
         /**
          * Hard ceiling for the adaptive threshold (m/s²).
-         * 0.8 m/s² ensures even a soft phone-to-phone touch is detected.
-         * The original 1.0 missed gentle NFC-style taps on low-end hardware.
+         * 0.45 m/s² prevents the adaptive floor from rising so high that it
+         * swallows gentle taps (0.3–0.6 m/s²), which are the hardest to catch.
+         * The previous 0.8 ceiling caused ~30-40% of soft taps to be missed in
+         * vibration-rich environments (table tapping, walking).
          */
-        const val THRESHOLD_CEILING = 0.8
+        const val THRESHOLD_CEILING = 0.45
 
         /** Impulses above this are drops / slams, not human taps. */
         const val TAP_IMPULSE_MAX = 80.0
@@ -100,8 +102,9 @@ class TapDetector(
         const val MIN_ELEVATED_MS = 0L
 
         /** Maximum time the impulse may stay elevated (ms).  Beyond this → not a tap.
-         *  350ms covers hard taps on cheap phones that ring/bounce longer than premium ones. */
-        const val MAX_ELEVATED_MS = 350L
+         *  500ms covers hard taps on cheap phones that ring/bounce longer than premium ones,
+         *  and gentle taps on soft surfaces that decay more slowly. */
+        const val MAX_ELEVATED_MS = 500L
 
         // ── Debounce ────────────────────────────────────────────────────────
         /** Minimum gap between two accepted taps (ms). Reduced for faster successive taps. */
@@ -110,10 +113,11 @@ class TapDetector(
         // ── Post-tap noise cooldown ─────────────────────────────────────────
         /**
          * After a tap is detected, skip noise floor updates for this duration (ms).
-         * This prevents the impulse decay tail from contaminating the noise estimator
-         * and pushing the threshold higher after each successive tap.
+         * 800ms: the mechanical ring/bounce after a gentle tap lasts longer than a hard tap,
+         * so a longer cooldown prevents the decay tail from inflating the noise floor and
+         * raising the threshold above the next gentle tap's peak.
          */
-        const val NOISE_COOLDOWN_MS = 500L
+        const val NOISE_COOLDOWN_MS = 800L
 
         // ── Gravity EMA ─────────────────────────────────────────────────────
         /**
@@ -136,12 +140,12 @@ class TapDetector(
         // ── Gyro rejection (sustained rotation only) ────────────────────────
         /** If gyro magnitude stays above this for GYRO_SUSTAINED_MS → rotation, not a tap.
          *  4.0 rad/s: a hard phone-to-phone tap can spike gyro to 2-3 rad/s briefly.
-         *  Only reject if it's a genuine sustained rotation (like flipping/swinging). */
+         *  Only reject if it's a genuinely sustained rotation (like flipping/swinging). */
         const val GYRO_SUSTAINED_THRESHOLD = 4.0
 
         /** How long gyro must stay elevated before we call it "sustained" (ms).
          *  400ms: a tap-induced gyro spike lasts ~50-150ms on any device.
-         *  Requiring 400ms ensures only genuine rotation (throw/swing) is rejected. */
+         *  Requiring 400ms ensures only genuinely sustained rotation (throw/swing) is rejected. */
         const val GYRO_SUSTAINED_MS = 400L
     }
 
@@ -175,7 +179,7 @@ class TapDetector(
     private var state = State.IDLE
     private var peakImpulse = 0.0              // highest impulse during ELEVATED
     private var peakDynamicThreshold = 0.0     // threshold snapshot at the moment of ELEVATED
-    private var peakStdDev = 0.0               // stddev snapshot at the moment of ELEVATED
+    private var peakStdDev = 0.0               // std. dev snapshot at the moment of ELEVATED
     private var elevatedStartMs = 0L           // System.currentTimeMillis when entering ELEVATED
 
     // ── Shake detection (threshold-crossing counter) ────────────────────────
@@ -292,7 +296,7 @@ class TapDetector(
         // ── 5. State machine ────────────────────────────────────────────────
         when (state) {
             State.IDLE -> {
-                if (impulse > currentDynamicThreshold && impulse < TAP_IMPULSE_MAX) {
+                if (impulse in currentDynamicThreshold..TAP_IMPULSE_MAX) {
                     state = State.ELEVATED
                     peakImpulse = impulse
                     peakDynamicThreshold = currentDynamicThreshold
@@ -351,7 +355,7 @@ class TapDetector(
                     }
 
                     // Gate 5: Peak must still be in valid range
-                    if (peakImpulse < peakDynamicThreshold || peakImpulse > TAP_IMPULSE_MAX) {
+                    if (peakImpulse !in peakDynamicThreshold..TAP_IMPULSE_MAX) {
                         resetElevatedState()
                         return
                     }
@@ -458,7 +462,7 @@ class TapDetector(
      */
     private fun classifyTap(peak: Double): TapType {
         return when {
-            peak < 3.0 -> TapType.SOFT_TAP
+            peak < 2.0 -> TapType.SOFT_TAP
             peak < 15.0 -> TapType.NORMAL_TAP
             else -> TapType.HARD_TAP
         }

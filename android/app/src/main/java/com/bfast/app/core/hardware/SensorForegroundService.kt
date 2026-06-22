@@ -205,6 +205,10 @@ class SensorForegroundService : Service(), SensorEventListener {
         private val _proximityScore = MutableStateFlow(0f)
         val proximityScore: StateFlow<Float> = _proximityScore
 
+        // ── All receivers in detection range (for multi-receiver picker) ──
+        private val _nearbyReceivers = MutableStateFlow<List<DiscoveredDevice>>(emptyList())
+        val nearbyReceivers: StateFlow<List<DiscoveredDevice>> = _nearbyReceivers
+
         // ── Sensor test screen live values (10Hz sampled in updateSensorData) ──
         val liveImpulse = MutableStateFlow(0.0)
         val liveGyroMag = MutableStateFlow(0.0)
@@ -253,6 +257,7 @@ class SensorForegroundService : Service(), SensorEventListener {
             _nearbyReceiver.value = null
             _tapConfirmedForPayment.value = false
             _proximityScore.value = 0f
+            _nearbyReceivers.value = emptyList()
             // Reset engines
             instance?.let {
                 it.bleManager.resetClosestDevice()
@@ -408,11 +413,9 @@ class SensorForegroundService : Service(), SensorEventListener {
 
                     when (state) {
                         HandshakeState.IDLE -> {
-                            // IDLE → DISCOVERED: When a target is detected nearby
-                            // proxScore ≥ 20 = device is within BLE detection range
-                            // This is intentionally loose — the TAP is the security gate,
-                            // not BLE proximity. Discovery just means "a target exists".
-                            if (device.role == targetRole && proxScore >= 20f) {
+                            // IDLE → DISCOVERED: target detected within ~10cm range.
+                            // proxScore ≥ 25 maps to approximately -60 dBm (10–15cm).
+                            if (device.role == targetRole && proxScore >= 25f) {
                                 _handshakeState.value = HandshakeState.DISCOVERED
                                 applySensorMode("FAST_TAP")
                                 discoveredAtMs = now
@@ -445,14 +448,12 @@ class SensorForegroundService : Service(), SensorEventListener {
                                 }
 
                                 // DISCOVERED → ARMED proximity thresholds:
-                                //   SENDER mode:   proxScore ≥ 35, 300ms after lock
-                                //   RECEIVER mode: proxScore ≥ 30, rssi ≥ -75
-                                //     Why 30 not 50: at -55 dBm (contact range) proxScore ≈ 42
-                                //     due to the dwell component not yet saturated. 50 would
-                                //     never arm for devices with slightly weaker BLE radios.
-                                //     ReceiverLock already enforces MIN_STABLE_DURATION_MS=500ms
-                                //     so stableMs=0 avoids a redundant second wait.
-                                val armProxThreshold = if (isSender) 30f else 20f
+                                //   SENDER mode:   proxScore ≥ 55 (~5cm, -45 dBm)
+                                //   RECEIVER mode: proxScore ≥ 35 (~8cm, -55 dBm)
+                                //     Receiver threshold is looser because the physical tap
+                                //     is the true security gate; receiver just needs to be
+                                //     "in the area" to arm its accelerometer.
+                                val armProxThreshold = if (isSender) 55f else 35f
                                 val armRssiThreshold = Int.MIN_VALUE // ReceiverLock already enforces RSSI
                                 val stableMs = if (isSender) 200L else 0L
 
@@ -464,8 +465,8 @@ class SensorForegroundService : Service(), SensorEventListener {
                                 }
                             }
 
-                            // DISCOVERED → IDLE: Receiver lost
-                            if (proxScore < 10f) {
+                            // DISCOVERED → IDLE: Receiver left detection range
+                            if (proxScore < 15f) {
                                 _handshakeState.value = HandshakeState.IDLE
                                 applySensorMode("WARM_BASELINE")
                                 _nearbyReceiver.value = null
@@ -629,9 +630,20 @@ class SensorForegroundService : Service(), SensorEventListener {
         // Start sensors in warm-baseline mode
         applySensorMode("WARM_BASELINE")
 
+        // Forward BleManager's nearbyReceivers into the companion StateFlow for UI access
+        serviceScope.launch {
+            bleManager.nearbyReceivers.collect { list ->
+                _nearbyReceivers.value = list
+            }
+        }
+
         // Start scanning automatically
         if (bleManager.isBluetoothEnabled()) {
             bleManager.startScanning()
+            // Start as receiver by default; heartbeat keeps advertising alive on MIUI/OEM phones
+            if (!isSenderMode.value) {
+                startReceiverHeartbeat()
+            }
         }
 
         // React to role changes — advertise as SENDER or RECEIVER
@@ -669,10 +681,13 @@ class SensorForegroundService : Service(), SensorEventListener {
         heartbeatJob?.cancel()
         heartbeatJob = serviceScope.launch {
             while (isActive) {
-                // TODO: Call server to report "I am alive and listening"
-                // paymentCommitClient.sendHeartbeat(myDeviceId, bleManager.currentSessionId)
-                Log.d(TAG, "Heartbeat: Receiver is online.")
-                kotlinx.coroutines.delay(10_000) // 10s heartbeat
+                kotlinx.coroutines.delay(20_000) // re-advertise every 20s
+                // MIUI and other OEMs silently stop BLE advertising after a few seconds.
+                // Re-starting keeps the receiver visible to senders continuously.
+                if (!isSenderMode.value && _handshakeState.value == HandshakeState.IDLE) {
+                    bleManager.startAdvertising("R", myDisplayName, myDeviceId)
+                    Log.d(TAG, "Receiver keep-alive: re-advertised as R")
+                }
             }
         }
     }

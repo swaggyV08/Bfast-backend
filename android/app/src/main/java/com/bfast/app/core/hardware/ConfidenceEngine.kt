@@ -138,17 +138,17 @@ class ConfidenceEngine {
         durationMs: Long,
         gyroMagnitude: Double
     ): Float {
-        // Type score: NORMAL_TAP is ideal, SOFT_TAP is acceptable
+        // Type score: all tap types are acceptable — soft taps are intentional gentle touches
         val typeScore = when (tapType) {
-            TapType.SOFT_TAP -> 60f
+            TapType.SOFT_TAP -> 85f
             TapType.NORMAL_TAP -> 100f
             TapType.HARD_TAP -> 90f
         }
 
-        // Duration score: 5–80ms = clean impulse, 80–150ms = acceptable, >150ms = poor
+        // Duration score: 0–120ms = clean impulse, 121–250ms = acceptable, >250ms = poor
         val durScore = when {
-            durationMs in 0..80 -> 100f
-            durationMs in 81..150 -> 70f
+            durationMs in 0..120 -> 100f
+            durationMs in 121..250 -> 70f
             else -> 30f
         }
 
