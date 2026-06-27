@@ -170,9 +170,9 @@ export async function pollTapController(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { senderDeviceId, receiverDeviceId } = req.query as {
-      senderDeviceId: string;
+    const { receiverDeviceId, senderDeviceId = '' } = req.query as {
       receiverDeviceId: string;
+      senderDeviceId?: string;
     };
     const authReq = req as AuthenticatedRequest;
 

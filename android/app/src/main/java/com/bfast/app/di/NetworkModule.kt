@@ -24,7 +24,7 @@ import javax.inject.Singleton
 object NetworkModule {
 
     // IMPORTANT: Replace this with your machine's local IP address or 10.0.2.2 for Android emulator
-    private const val BASE_URL = "http://192.168.88.7:3000/api/v1/"
+    private const val BASE_URL = "http://192.168.1.5:3000/api/v1/"
 
     @Provides
     @Singleton

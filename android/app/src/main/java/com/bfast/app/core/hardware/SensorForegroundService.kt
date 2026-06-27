@@ -129,6 +129,9 @@ class SensorForegroundService : Service(), SensorEventListener {
         const val NOTIFICATION_ID = 1
         private const val PAYMENT_NOTIFICATION_ID_BASE = 1000
 
+        const val ACTION_PAUSE  = "com.bfast.app.ACTION_PAUSE_SCANNING"
+        const val ACTION_RESUME = "com.bfast.app.ACTION_RESUME_SCANNING"
+
         // Persistent device ID — set from DataStore before service starts
         var myDeviceId: String = "user-${java.util.UUID.randomUUID().toString().take(8)}"
         var myDisplayName: String = "User"
@@ -991,6 +994,25 @@ class SensorForegroundService : Service(), SensorEventListener {
     // ════════════════════════════════════════════════════════════════════════
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_PAUSE -> {
+                // App is backgrounded — stop BLE scan to remove persistent notification
+                bleManager.stopScanning()
+                bleManager.stopAdvertising()
+                tapDetector.armed = false
+                Log.i(TAG, "BLE scanning paused (app backgrounded)")
+                return START_STICKY
+            }
+            ACTION_RESUME -> {
+                // App is foregrounded again — restart scanning
+                val role = if (isSenderMode.value) "S" else "R"
+                bleManager.startScanning()
+                bleManager.startAdvertising(role, myDisplayName, myDeviceId)
+                Log.i(TAG, "BLE scanning resumed (app foregrounded)")
+                return START_STICKY
+            }
+        }
+
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("BFast Active")
             .setContentText("Scanning for nearby devices...")

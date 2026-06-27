@@ -33,10 +33,10 @@ export type CorrelateTapInput = z.infer<typeof correlateTapSchema>;
 // ── Tap Event (receiver reports a physical tap to backend) ─────────────────
 export const tapEventSchema = z.object({
   receiverDeviceId: z.string().min(1, 'Receiver device ID is required'),
-  senderDeviceId: z.string().min(1, 'Sender device ID is required'),
+  senderDeviceId: z.string().optional().default(''),
   accelPeakMs2: z.number().min(0, 'Acceleration must be non-negative'),
-  rssi: z.number().int(),
-  tapTimestamp: z.string(),
+  rssi: z.number().int().optional().default(0),
+  tapTimestamp: z.string().optional().default(() => new Date().toISOString()),
 });
 
 export type TapEventInput = z.infer<typeof tapEventSchema>;

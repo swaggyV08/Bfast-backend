@@ -12,6 +12,7 @@ interface TapEvent {
   tapEventId: string;
   timestamp: number;
   accelPeakMs2: number;
+  scId: string;
 }
 const tapEventStore = new Map<string, TapEvent>();
 
@@ -144,17 +145,28 @@ export async function getActiveSession(
  * Stores the event in memory so the sender can poll for it.
  */
 export async function reportReceiverTap(
-  input: { receiverDeviceId: string; senderDeviceId: string; accelPeakMs2: number; rssi: number; tapTimestamp: string },
+  input: { receiverDeviceId: string; senderDeviceId?: string; accelPeakMs2: number; rssi?: number; tapTimestamp?: string },
   _userId: string,
   correlationId: string,
 ): Promise<{ tapEventId: string }> {
-  const key = `${input.receiverDeviceId}:${input.senderDeviceId}`;
+  const key = input.receiverDeviceId; // keyed only by receiver — sender ID not needed
   const tapEventId = generateSecureRandom(8);
+
+  // Fetch the active session's scId so the sender can submit a transaction
+  // without a GATT connection. Failure is non-fatal — scId just stays empty.
+  let scId = '';
+  try {
+    const activeSession = await sessionRepo.getActiveSessionForDevice(
+      input.receiverDeviceId, correlationId,
+    );
+    scId = activeSession?.sc_id ?? '';
+  } catch (_) {}
 
   tapEventStore.set(key, {
     tapEventId,
     timestamp: Date.now(),
     accelPeakMs2: input.accelPeakMs2,
+    scId,
   });
 
   // Auto-expire after TTL
@@ -165,7 +177,7 @@ export async function reportReceiverTap(
     key,
     tapEventId,
     accelPeakMs2: input.accelPeakMs2,
-    rssi: input.rssi,
+    rssi: input.rssi ?? 0,
   });
 
   return { tapEventId };
@@ -177,11 +189,11 @@ export async function reportReceiverTap(
  * Does NOT consume the event (TTL handles cleanup — idempotent within window).
  */
 export async function pollTapStatus(
-  senderDeviceId: string,
+  _senderDeviceId: string,
   receiverDeviceId: string,
   correlationId: string,
-): Promise<{ confirmed: boolean }> {
-  const key = `${receiverDeviceId}:${senderDeviceId}`;
+): Promise<{ confirmed: boolean; scId?: string; receiverDeviceId?: string }> {
+  const key = receiverDeviceId; // keyed only by receiver — matches reportReceiverTap
   const event = tapEventStore.get(key);
 
   if (!event) {
@@ -194,8 +206,8 @@ export async function pollTapStatus(
     return { confirmed: false };
   }
 
-  logger.debug('Tap poll: confirmed', { correlationId, key, ageMs: age });
-  return { confirmed: true };
+  logger.debug('Tap poll: confirmed', { correlationId, key, ageMs: age, scId: event.scId });
+  return { confirmed: true, scId: event.scId, receiverDeviceId: key };
 }
 
 /**

@@ -12,13 +12,21 @@ export interface WalletBalance {
   isFrozen: boolean;
 }
 
+const TEST_SEED_PAISE = 200_000; // ₹2,000 one-time testing seed
+
 export async function getBalance(
   userId: string,
   correlationId: string,
 ): Promise<WalletBalance> {
-  const wallet = await walletRepo.getWalletByUserId(userId, correlationId);
+  let wallet = await walletRepo.getWalletByUserId(userId, correlationId);
   if (!wallet) {
     throw new NotFoundError('Wallet');
+  }
+
+  // One-time test seed: give every user ₹2,000 if their wallet is empty.
+  if (wallet.balance_paise === 0) {
+    wallet = await walletRepo.topupWallet(userId, TEST_SEED_PAISE, correlationId);
+    logger.info('Test seed applied', { correlationId, userId, amountPaise: TEST_SEED_PAISE });
   }
 
   return {
