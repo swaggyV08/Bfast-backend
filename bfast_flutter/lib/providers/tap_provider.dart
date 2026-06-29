@@ -12,6 +12,7 @@ import '../services/dual_device_correlator.dart';
 import '../services/secure_session.dart';
 import '../services/api_service.dart';
 import '../models/payment_result.dart';
+import '../services/proximity_engine.dart';
 import 'auth_provider.dart';
 
 // ── Protocol phases ────────────────────────────────────────────────────────
@@ -124,10 +125,13 @@ class TapNotifier extends StateNotifier<TapState> {
   // Sender: set to true to stop the motion-event poll loop
   bool _stopPoll = false;
 
+  ProximityEngine? _activeEngine;
+
   StreamSubscription<List<BleDeviceInfo>>? _receiversSub;
   StreamSubscription<double>?              _impulseSub;
   StreamSubscription?                      _gattServerSub;
   StreamSubscription?                      _disconnectSub;
+  StreamSubscription?                      _engineSub;
   Timer? _sessionTimer;
   Timer? _handshakeTimer;
 
@@ -246,7 +250,7 @@ class TapNotifier extends StateNotifier<TapState> {
         _hsStep = _HandshakeStep.capabilities;
         _go(ProtocolPhase.sessionSetup);
 
-        final caps = DeviceCapabilities(hasUwb: false, hasHighRateImu: true);
+        final caps = DeviceCapabilities(hasUwb: _uwb.isAvailable, hasHighRateImu: true);
         final respBytes = GattMsg.encode(AppConstants.gattMsgCapabilities,
             [AppConstants.protocolVersion, caps.toByte()]);
         _log('Step2: setting capabilities response in FFF3');
@@ -306,11 +310,38 @@ class TapNotifier extends StateNotifier<TapState> {
         _log('Step7: received ACK — handshake complete');
         _handshakeTimer?.cancel();
         await _ble.setReceiverBusy(true);
+
+        // Default engine: BleImu. Upgraded to UwbEngine if step 7.5 follows.
+        _engineSub?.cancel();
+        _activeEngine?.stop();
+        _activeEngine = BleImuEngine(_tapDetector);
+        _engineSub = _activeEngine!.events.listen(_onEngineEvent);
+
         _armImu();
         _startSessionTimer();
         _go(ProtocolPhase.armed);
         _toast('Ready — tap phones together to pay',
             color: const Color(0xFF4CAF50));
+
+      // ── Step 7.5a: Sender's UWB NI token (iOS ↔ iOS, optional) ──────
+      case AppConstants.gattMsgUwbToken:
+        if (_hsStep != _HandshakeStep.complete) return;
+        if (!_uwb.isAvailable) return; // we don't support UWB, ignore gracefully
+
+        final senderTokenHex = String.fromCharCodes(payload);
+        _log('Step7.5a: sender UWB token received (${payload.length} chars)');
+
+        final myToken = await _uwb.getLocalToken();
+        if (myToken == null) {
+          _log('Step7.5a: own UWB token unavailable — staying with BleImuEngine');
+          return;
+        }
+
+        await _setReceiverResponse(
+            GattMsg.encode(AppConstants.gattMsgUwbToken, myToken.codeUnits));
+        _log('Step7.5b: own UWB token stored in FFF3');
+
+        await _switchToUwbEngine(senderTokenHex);
 
       // ── Sender's tap event ────────────────────────────────────────────
       case AppConstants.gattMsgMotionEvent:
@@ -429,7 +460,7 @@ class TapNotifier extends StateNotifier<TapState> {
     _startHandshakeTimer();
 
     // ── Step 1: send capabilities ────────────────────────────────────────
-    final caps = DeviceCapabilities(hasUwb: false, hasHighRateImu: true);
+    final caps = DeviceCapabilities(hasUwb: _uwb.isAvailable, hasHighRateImu: true);
     try {
       await _ble.senderWriteHandshake(
           AppConstants.gattMsgCapabilities,
@@ -516,6 +547,44 @@ class TapNotifier extends StateNotifier<TapState> {
 
     _hsStep = _HandshakeStep.complete;
     _handshakeTimer?.cancel();
+
+    // ── Step 7.5: Optional UWB token exchange (iOS ↔ iOS) ───────────────
+    bool usingUwb = false;
+    if (_uwb.isAvailable && (_session?.remoteCapabilities?.hasUwb ?? false)) {
+      final myToken = await _uwb.getLocalToken();
+      if (myToken != null) {
+        try {
+          await _ble.senderWriteHandshake(
+              AppConstants.gattMsgUwbToken, myToken.codeUnits);
+          _log('Step7.5a: UWB token written (${myToken.length} chars)');
+
+          final step75 = await _ble.senderWaitForResponse(
+              expectedType: AppConstants.gattMsgUwbToken,
+              lastSeq:      _lastReceiverSeq,
+              timeoutMs:    5000);
+
+          if (step75 != null && mounted) {
+            _lastReceiverSeq = step75[0];
+            final peerTokenHex = String.fromCharCodes(step75.sublist(2));
+            _log('Step7.5b: peer UWB token received — switching to UwbEngine');
+            await _switchToUwbEngine(peerTokenHex);
+            usingUwb = true;
+          } else {
+            _log('Step7.5: no UWB token response — using BleImuEngine');
+          }
+        } catch (e) {
+          _log('Step7.5: UWB token exchange error: $e');
+        }
+      }
+    }
+
+    if (!usingUwb) {
+      _engineSub?.cancel();
+      _activeEngine?.stop();
+      _activeEngine = BleImuEngine(_tapDetector);
+      _engineSub = _activeEngine!.events.listen(_onEngineEvent);
+    }
+
     _armSender(receiverInfo.displayName);
 
     // Start polling FFF3 for incoming motion events from receiver
@@ -599,13 +668,29 @@ class TapNotifier extends StateNotifier<TapState> {
     _log('Local tap: peak=${sig.peakAccelMs2.toStringAsFixed(1)} '
         'dur=${sig.durationMs}ms conf=${sig.confidence.toStringAsFixed(3)}');
 
+    // UwbEngine intercepts here: distance+tap → TapMutuallyConfirmedByUwb event
+    _activeEngine?.onLocalTap(sig);
+
+    if (_activeEngine is UwbEngine) {
+      // UWB mode: confirmation comes via engine event stream.
+      // Still send motion event so the receiver backend can log the tap.
+      if (state.phase == ProtocolPhase.armed) _go(ProtocolPhase.tapDetected);
+      if (_isSender) {
+        _ble.senderWriteMotion(sig, _myDeviceId);
+      } else {
+        _storeReceiverMotionEvent(sig);
+        _reportTapToBackend(sig);
+      }
+      return;
+    }
+
+    // BleImuEngine: existing inline correlation
     final result = _correlator.recordLocalTap(sig);
     if (state.phase == ProtocolPhase.armed) _go(ProtocolPhase.tapDetected);
 
     if (_isSender) {
       _ble.senderWriteMotion(sig, _myDeviceId);
     } else {
-      // Receiver: store motion event in FFF3 for sender to poll
       _storeReceiverMotionEvent(sig);
       _reportTapToBackend(sig);
     }
@@ -621,6 +706,9 @@ class TapNotifier extends StateNotifier<TapState> {
   }
 
   void _onRemoteMotionPayload(List<int> payload) {
+    // UWB mode: distance is the proximity signal; ignore BLE correlation
+    if (_activeEngine is UwbEngine) return;
+
     final payloadStr = String.fromCharCodes(payload);
     final remote     = _correlator.decodeTapFromBle(payloadStr);
     if (remote == null) return;
@@ -634,6 +722,46 @@ class TapNotifier extends StateNotifier<TapState> {
       _go(ProtocolPhase.motionExchanged);
     }
     if (result != null && result.matched) _onMutualConfirmation();
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  //  PROXIMITY ENGINE
+  // ════════════════════════════════════════════════════════════════════════
+
+  void _onEngineEvent(ProximityEvent event) {
+    switch (event) {
+      case UwbRangeUpdate(:final distanceMeters):
+        state = state.copyWith(uwbDistance: distanceMeters);
+      case TapMutuallyConfirmedByUwb():
+        _onMutualConfirmation();
+      case ProximityEngineFailure(:final reason):
+        _log('ProximityEngine failed ($reason) — falling back to BleImuEngine');
+        _switchToBleImuEngine();
+    }
+  }
+
+  /// Switch to UwbEngine after token exchange is complete.
+  /// Assumes [UwbService.startRanging(peerTokenHex)] has NOT yet been called.
+  Future<void> _switchToUwbEngine(String peerTokenHex) async {
+    await _uwb.startRanging(peerTokenHex);
+    _engineSub?.cancel();
+    _activeEngine?.stop();
+    _activeEngine = UwbEngine(uwb: _uwb, tapDetector: _tapDetector);
+    _engineSub = _activeEngine!.events.listen(_onEngineEvent);
+    await _activeEngine!.start();
+    state = state.copyWith(uwbDistance: null);
+    _log('UwbEngine active');
+  }
+
+  /// Fall back from UwbEngine → BleImuEngine without touching BLE session.
+  void _switchToBleImuEngine() {
+    _engineSub?.cancel();
+    _engineSub = null;
+    _activeEngine?.stop();
+    _activeEngine = BleImuEngine(_tapDetector);
+    _activeEngine!.start();
+    state = state.copyWith(uwbDistance: null);
+    _log('Switched to BleImuEngine (session intact)');
   }
 
   void _onMutualConfirmation() {
@@ -823,6 +951,7 @@ class TapNotifier extends StateNotifier<TapState> {
     _impulseSub?.cancel();
     _gattServerSub?.cancel();
     _disconnectSub?.cancel();
+    _engineSub?.cancel();
     _sensors.stopListening();
     _ble.stopScanning();
     _ble.disconnect();
@@ -831,6 +960,7 @@ class TapNotifier extends StateNotifier<TapState> {
     _tapDetector.reset();
     _correlator.reset();
     _session?.dispose();
+    _activeEngine?.stop(); // fire-and-forget; _disarmImu already resets armed flag
 
     _sessionTimer    = null;
     _handshakeTimer  = null;
@@ -838,6 +968,8 @@ class TapNotifier extends StateNotifier<TapState> {
     _impulseSub      = null;
     _gattServerSub   = null;
     _disconnectSub   = null;
+    _engineSub       = null;
+    _activeEngine    = null;
     _session         = null;
     _mySessionId     = '';
     _isSender        = false;

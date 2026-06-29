@@ -2,41 +2,64 @@ import Foundation
 import Flutter
 import CoreBluetooth
 
-/// Manages BLE peripheral advertising for the Receiver role on iOS.
-/// flutter_blue_plus only exposes central (scanner) APIs, so this native
-/// handler uses CoreBluetooth's CBPeripheralManager directly.
-class BleAdvertiseHandler: NSObject, CBPeripheralManagerDelegate {
+/// BLE peripheral advertising for the SENDER role on iOS.
+///
+/// RECEIVER role: advertising is handled by GattServerHandler (it starts when
+/// the GATT service is added). This handler stores the device name/ID so
+/// GattServerHandler can use it, then returns immediately.
+///
+/// SENDER role: advertise local name "BFAST_<displayName>" + service UUID FFF0.
+/// iOS foreground advertising cannot include arbitrary manufacturer data
+/// (OS restriction), so we use local name + service UUID as the discovery signal.
+/// The scanner's fallback path in ble_service.dart already handles name-prefix
+/// matching when manufacturer data is absent.
+///
+/// MethodChannel: "com.bfast.app/ble_advertise"
+///   startAdvertising(deviceId: String, displayName: String, isSender: Bool)
+///   stopAdvertising()
+class BleAdvertiseHandler: NSObject {
 
-    private let methodChannel:  FlutterMethodChannel
-    private var peripheralMgr:  CBPeripheralManager?
-    private var pendingAdData:  (deviceId: String, displayName: String)?
+    private static let tag = "BleAdvertiseHandler"
 
-    private let serviceUUID  = CBUUID(string: "FFF0")
-    private let tapCharUUID  = CBUUID(string: "FFF1")
-    private let sessCharUUID = CBUUID(string: "FFF2")
+    private let methodChannel: FlutterMethodChannel
+    private weak var gattHandler: GattServerHandler?
 
-    init(messenger: FlutterBinaryMessenger) {
-        methodChannel = FlutterMethodChannel(
+    // Dedicated CBPeripheralManager for sender-only advertising.
+    // Kept separate from GattServerHandler's manager to avoid state conflicts.
+    private var senderPeripheralMgr: CBPeripheralManager?
+    private var pendingSenderAd: (deviceId: String, displayName: String)?
+
+    private static let serviceUUID = GattServerHandler.serviceUUID
+
+    // ── Init ─────────────────────────────────────────────────────────────────
+
+    init(messenger: FlutterBinaryMessenger, gattHandler: GattServerHandler) {
+        self.methodChannel = FlutterMethodChannel(
             name: "com.bfast.app/ble_advertise",
             binaryMessenger: messenger
         )
+        self.gattHandler = gattHandler
         super.init()
         methodChannel.setMethodCallHandler(handle)
-        peripheralMgr = CBPeripheralManager(delegate: self, queue: nil)
     }
+
+    // ── MethodChannel handler ─────────────────────────────────────────────────
 
     private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
+
         case "startAdvertising":
-            guard let args = call.arguments as? [String: Any],
+            guard let args        = call.arguments as? [String: Any],
                   let deviceId    = args["deviceId"]    as? String,
-                  let displayName = args["displayName"] as? String else {
+                  let displayName = args["displayName"] as? String
+            else {
                 result(FlutterError(code: "INVALID_ARGS",
                                     message: "deviceId and displayName required",
                                     details: nil))
                 return
             }
-            startAdvertising(deviceId: deviceId, displayName: displayName)
+            let isSender = args["isSender"] as? Bool ?? false
+            startAdvertising(deviceId: deviceId, displayName: displayName, isSender: isSender)
             result(nil)
 
         case "stopAdvertising":
@@ -48,69 +71,81 @@ class BleAdvertiseHandler: NSObject, CBPeripheralManagerDelegate {
         }
     }
 
-    func startAdvertising(deviceId: String, displayName: String) {
-        guard let mgr = peripheralMgr, mgr.state == .poweredOn else {
-            pendingAdData = (deviceId, displayName)
-            return
+    // ── Public API ────────────────────────────────────────────────────────────
+
+    func startAdvertising(deviceId: String, displayName: String, isSender: Bool) {
+        if isSender {
+            startSenderAdvertising(deviceId: deviceId, displayName: displayName)
+        } else {
+            // Receiver role: GattServerHandler owns advertising.
+            // Store the name so it can build the correct local name when the
+            // service is added (startGattServer is called right after this).
+            gattHandler?.advertisingDeviceId    = deviceId
+            gattHandler?.advertisingDisplayName = displayName
+            log("receiver ad info stored → GattServerHandler will advertise as 'BFAST_\(displayName.prefix(12))'")
         }
-
-        // Build GATT service with tap characteristic
-        let tapChar = CBMutableCharacteristic(
-            type:        tapCharUUID,
-            properties:  [.read, .notify, .writeWithoutResponse],
-            value:       nil,
-            permissions: [.readable, .writeable]
-        )
-        let sessChar = CBMutableCharacteristic(
-            type:        sessCharUUID,
-            properties:  [.read, .write],
-            value:       nil,
-            permissions: [.readable, .writeable]
-        )
-        let service = CBMutableService(type: serviceUUID, primary: true)
-        service.characteristics = [tapChar, sessChar]
-
-        mgr.removeAllServices()
-        mgr.add(service)
-
-        let adName = "BFAST_\(deviceId.prefix(6))"
-        mgr.startAdvertising([
-            CBAdvertisementDataLocalNameKey:   adName,
-            CBAdvertisementDataServiceUUIDsKey: [serviceUUID],
-        ])
     }
 
     func stopAdvertising() {
-        peripheralMgr?.stopAdvertising()
-        peripheralMgr?.removeAllServices()
+        senderPeripheralMgr?.stopAdvertising()
+        senderPeripheralMgr = nil
+        pendingSenderAd     = nil
+        log("sender advertising stopped")
     }
 
-    // ── CBPeripheralManagerDelegate ─────────────────────────────────────
+    // ── Sender advertising ───────────────────────────────────────────────────
+
+    private func startSenderAdvertising(deviceId: String, displayName: String) {
+        pendingSenderAd = (deviceId, displayName)
+        if senderPeripheralMgr == nil {
+            senderPeripheralMgr = CBPeripheralManager(delegate: self, queue: nil)
+        }
+        if senderPeripheralMgr?.state == .poweredOn {
+            doAdvertiseSender()
+        }
+        // Otherwise waits for peripheralManagerDidUpdateState callback
+    }
+
+    private func doAdvertiseSender() {
+        guard let pm = senderPeripheralMgr, pm.state == .poweredOn,
+              let pending = pendingSenderAd else { return }
+        pm.stopAdvertising()
+        let safe = String(pending.displayName
+            .replacingOccurrences(of: "_", with: "")
+            .prefix(12))
+        let localName = "BFAST_\(safe.isEmpty ? "User" : safe)"
+        // iOS foreground advertising: local name + service UUID only.
+        // Manufacturer data (role byte) is suppressed by the OS in foreground.
+        pm.startAdvertising([
+            CBAdvertisementDataLocalNameKey:    localName,
+            CBAdvertisementDataServiceUUIDsKey: [BleAdvertiseHandler.serviceUUID],
+        ])
+        log("sender advertising as '\(localName)'")
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private func log(_ msg: String) {
+        print("[\(BleAdvertiseHandler.tag)] \(msg)")
+    }
+}
+
+// ── CBPeripheralManagerDelegate (sender manager only) ─────────────────────────
+
+extension BleAdvertiseHandler: CBPeripheralManagerDelegate {
 
     func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
-        if peripheral.state == .poweredOn, let pending = pendingAdData {
-            startAdvertising(deviceId: pending.deviceId, displayName: pending.displayName)
-            pendingAdData = nil
+        guard peripheral === senderPeripheralMgr else { return }
+        if peripheral.state == .poweredOn {
+            doAdvertiseSender()
         }
     }
 
-    func peripheralManager(_ peripheral: CBPeripheralManager,
-                           didAdd service: CBService, error: Error?) {
+    func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager,
+                                              error: Error?) {
+        guard peripheral === senderPeripheralMgr else { return }
         if let err = error {
-            print("[BleAdvertiseHandler] Failed to add service: \(err)")
-        }
-    }
-
-    func peripheralManager(_ peripheral: CBPeripheralManager,
-                           didReceiveRead request: CBATTRequest) {
-        request.value = Data()
-        peripheral.respond(to: request, withResult: .success)
-    }
-
-    func peripheralManager(_ peripheral: CBPeripheralManager,
-                           didReceiveWrite requests: [CBATTRequest]) {
-        for req in requests {
-            peripheral.respond(to: req, withResult: .success)
+            log("sender advertising failed: \(err.localizedDescription)")
         }
     }
 }

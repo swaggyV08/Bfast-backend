@@ -2,10 +2,15 @@ import Foundation
 import Flutter
 import NearbyInteraction
 
-/// Handles UWB ranging on iOS via the NINearbyInteraction framework.
-/// Available on iPhone 11 and later running iOS 14+.
-/// On unsupported devices [isUwbAvailable] returns false and all operations
-/// are no-ops, allowing the app to fall back to BLE-only proximity.
+/// UWB ranging on iOS via NINearbyInteraction.
+/// Available on iPhone 11 and later (iOS 14+).
+///
+/// TOKEN CONTRACT — matches Android's UwbChannelHandler.kt:
+///   getLocalToken  → returns hex-encoded String   (was FlutterStandardTypedData — fixed)
+///   startRanging   → receives hex-encoded String  (was FlutterStandardTypedData — fixed)
+///
+/// EventChannel emits Double (distance in metres) on each ranging update,
+/// matching Android which emits dist.toDouble().
 class UwbChannelHandler: NSObject {
 
     private let methodChannel: FlutterMethodChannel
@@ -13,7 +18,9 @@ class UwbChannelHandler: NSObject {
     private var eventSink: FlutterEventSink?
 
     @available(iOS 14.0, *)
-    private var niSession: NISession? = nil
+    private lazy var niSession: NISession? = nil
+
+    // ── Init ─────────────────────────────────────────────────────────────────
 
     init(messenger: FlutterBinaryMessenger) {
         methodChannel = FlutterMethodChannel(
@@ -28,6 +35,8 @@ class UwbChannelHandler: NSObject {
         methodChannel.setMethodCallHandler(handle)
         eventChannel.setStreamHandler(self)
     }
+
+    // ── MethodChannel handler ─────────────────────────────────────────────────
 
     private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
@@ -49,12 +58,15 @@ class UwbChannelHandler: NSObject {
             guard #available(iOS 14.0, *), NISession.isSupported else {
                 result(nil); return
             }
-            guard let args = call.arguments as? [String: Any],
-                  let tokenData = (args["peerToken"] as? FlutterStandardTypedData)?.data else {
-                result(FlutterError(code: "INVALID_ARGS", message: "peerToken required", details: nil))
+            guard let args         = call.arguments as? [String: Any],
+                  let peerTokenHex = args["peerToken"] as? String
+            else {
+                result(FlutterError(code: "INVALID_ARGS",
+                                    message: "peerToken (hex String) required",
+                                    details: nil))
                 return
             }
-            startRanging(peerTokenData: tokenData, result: result)
+            startRanging(peerTokenHex: peerTokenHex, result: result)
 
         case "stopRanging":
             stopRanging()
@@ -65,6 +77,8 @@ class UwbChannelHandler: NSObject {
         }
     }
 
+    // ── getLocalToken ─────────────────────────────────────────────────────────
+
     @available(iOS 14.0, *)
     private func getLocalToken(result: @escaping FlutterResult) {
         if niSession == nil {
@@ -72,7 +86,7 @@ class UwbChannelHandler: NSObject {
             niSession?.delegate = self
         }
         guard let token = niSession?.discoveryToken else {
-            // Session not ready yet
+            // Session not ready yet — caller should retry
             result(nil); return
         }
         do {
@@ -80,19 +94,33 @@ class UwbChannelHandler: NSObject {
                 withRootObject: token,
                 requiringSecureCoding: true
             )
-            result(FlutterStandardTypedData(bytes: data))
+            // Return as hex String — same contract as Android which returns a hex String
+            result(data.hexString)
         } catch {
-            result(FlutterError(code: "UWB_ERROR", message: error.localizedDescription, details: nil))
+            result(FlutterError(code: "UWB_ERROR",
+                                message: error.localizedDescription,
+                                details: nil))
         }
     }
 
+    // ── startRanging ──────────────────────────────────────────────────────────
+
     @available(iOS 14.0, *)
-    private func startRanging(peerTokenData: Data, result: @escaping FlutterResult) {
+    private func startRanging(peerTokenHex: String, result: @escaping FlutterResult) {
+        guard let peerData = Data(hexString: peerTokenHex) else {
+            result(FlutterError(code: "INVALID_ARGS",
+                                message: "peerToken is not valid hex",
+                                details: nil))
+            return
+        }
         do {
             guard let peerToken = try NSKeyedUnarchiver.unarchivedObject(
-                ofClass: NIDiscoveryToken.self, from: peerTokenData
+                ofClass: NIDiscoveryToken.self,
+                from: peerData
             ) else {
-                result(FlutterError(code: "UWB_ERROR", message: "Invalid peer token", details: nil))
+                result(FlutterError(code: "UWB_ERROR",
+                                    message: "Failed to decode NIDiscoveryToken",
+                                    details: nil))
                 return
             }
             if niSession == nil {
@@ -103,9 +131,13 @@ class UwbChannelHandler: NSObject {
             niSession?.run(config)
             result(nil)
         } catch {
-            result(FlutterError(code: "UWB_ERROR", message: error.localizedDescription, details: nil))
+            result(FlutterError(code: "UWB_ERROR",
+                                message: error.localizedDescription,
+                                details: nil))
         }
     }
+
+    // ── stopRanging ───────────────────────────────────────────────────────────
 
     func stopRanging() {
         if #available(iOS 14.0, *) {
@@ -115,22 +147,21 @@ class UwbChannelHandler: NSObject {
     }
 }
 
-// ── NISessionDelegate ─────────────────────────────────────────────────────
+// ── NISessionDelegate ─────────────────────────────────────────────────────────
 
 @available(iOS 14.0, *)
 extension UwbChannelHandler: NISessionDelegate {
 
     func session(_ session: NISession, didUpdate nearbyObjects: [NINearbyObject]) {
         guard let obj = nearbyObjects.first, let distance = obj.distance else { return }
-        DispatchQueue.main.async {
-            self.eventSink?(Double(distance))
+        DispatchQueue.main.async { [weak self] in
+            self?.eventSink?(Double(distance))
         }
     }
 
     func session(_ session: NISession, didInvalidateWith error: Error) {
-        // Peer left range — end the distance stream cleanly
-        DispatchQueue.main.async {
-            self.eventSink?(FlutterEndOfEventStream)
+        DispatchQueue.main.async { [weak self] in
+            self?.eventSink?(FlutterEndOfEventStream)
         }
     }
 
@@ -138,16 +169,43 @@ extension UwbChannelHandler: NISessionDelegate {
     func sessionSuspensionEnded(_ session: NISession) {}
 }
 
-// ── FlutterStreamHandler ──────────────────────────────────────────────────
+// ── FlutterStreamHandler ──────────────────────────────────────────────────────
 
 extension UwbChannelHandler: FlutterStreamHandler {
+
     func onListen(withArguments arguments: Any?,
                   eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         self.eventSink = events
         return nil
     }
+
     func onCancel(withArguments arguments: Any?) -> FlutterError? {
         self.eventSink = nil
         return nil
+    }
+}
+
+// ── Data hex extensions ───────────────────────────────────────────────────────
+
+private extension Data {
+    /// Decode a hex string into Data.  Returns nil if the string has odd length
+    /// or contains non-hex characters.
+    init?(hexString: String) {
+        let hex = hexString
+        guard hex.count.isMultiple(of: 2) else { return nil }
+        var result = Data(capacity: hex.count / 2)
+        var idx = hex.startIndex
+        while idx < hex.endIndex {
+            let next = hex.index(idx, offsetBy: 2)
+            guard let byte = UInt8(hex[idx..<next], radix: 16) else { return nil }
+            result.append(byte)
+            idx = next
+        }
+        self = result
+    }
+
+    /// Encode Data as a lowercase hex string.
+    var hexString: String {
+        map { String(format: "%02x", $0) }.joined()
     }
 }

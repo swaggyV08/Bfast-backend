@@ -278,6 +278,20 @@ class BleService {
         return false;
       }
 
+      // iOS only: subscribe to FFF3 NOTIFY so the iOS receiver's GattServerHandler
+      // can detect when this central disconnects (via didUnsubscribeFrom callback).
+      // The subscription carries no data — we still poll via READ.
+      // On Android receivers FFF3 is READ-only; setNotifyValue will throw and
+      // the catch swallows it silently.
+      if (Platform.isIOS &&
+          (_responseChar!.properties
+              .contains(BluetoothCharacteristicProperty.notify))) {
+        try {
+          await _responseChar!.setNotifyValue(true);
+          debugPrint('[BFAST][BLE] subscribed to FFF3 NOTIFY (iOS disconnect detection)');
+        } catch (_) {}
+      }
+
       // Watch for unexpected drops so tap_provider can recover.
       _connStateSub?.cancel();
       _connStateSub = device.connectionState.listen((s) {

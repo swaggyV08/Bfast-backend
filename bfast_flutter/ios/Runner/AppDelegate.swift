@@ -4,8 +4,9 @@ import UIKit
 @UIApplicationMain
 @objc class AppDelegate: FlutterAppDelegate {
 
-    private var uwbHandler: UwbChannelHandler?
-    private var bleHandler: BleAdvertiseHandler?
+    private var gattHandler: GattServerHandler?
+    private var uwbHandler:  UwbChannelHandler?
+    private var bleHandler:  BleAdvertiseHandler?
 
     override func application(
         _ application: UIApplication,
@@ -18,8 +19,14 @@ import UIKit
         }
 
         let messenger = controller.binaryMessenger
-        uwbHandler = UwbChannelHandler(messenger: messenger)
-        bleHandler = BleAdvertiseHandler(messenger: messenger)
+
+        // GattServerHandler must be initialised first — BleAdvertiseHandler holds
+        // a weak reference to it so it can store receiver advertising info.
+        let gatt     = GattServerHandler(messenger: messenger)
+        gattHandler  = gatt
+
+        uwbHandler   = UwbChannelHandler(messenger: messenger)
+        bleHandler   = BleAdvertiseHandler(messenger: messenger, gattHandler: gatt)
 
         return super.application(application, didFinishLaunchingWithOptions: launchOptions)
     }
@@ -27,5 +34,6 @@ import UIKit
     override func applicationWillTerminate(_ application: UIApplication) {
         uwbHandler?.stopRanging()
         bleHandler?.stopAdvertising()
+        gattHandler?.cleanup()
     }
 }

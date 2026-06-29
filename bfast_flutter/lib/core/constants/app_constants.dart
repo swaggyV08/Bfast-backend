@@ -22,6 +22,10 @@ class AppConstants {
   static const int gattMsgMotionEvent  = 0x04;
   /// Receiver is already in a session — sender should try another device.
   static const int gattMsgBusy         = 0x06;
+  /// UWB NI discovery token exchange (iOS ↔ iOS optional step 7.5, after ACK).
+  /// Payload: UTF-8 bytes of hex-encoded NIDiscoveryToken archive.
+  /// Android devices that do not support UWB will never send or handle this type.
+  static const int gattMsgUwbToken     = 0x07;
 
   /// Incremented when the on-wire GATT framing changes in a breaking way.
   static const int protocolVersion     = 1;
