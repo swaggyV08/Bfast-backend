@@ -2,7 +2,7 @@ class AppConstants {
   AppConstants._();
 
   // ── Backend ──────────────────────────────────────────────────────────
-  static const String baseUrl = 'http://192.168.0.147:3000/api/v1';
+  static const String baseUrl = 'http://192.168.88.13:3000/api/v1';
 
   // ── BLE UUIDs ────────────────────────────────────────────────────────
   static const String bleServiceUuid      = '0000FFF0-0000-1000-8000-00805F9B34FB';
