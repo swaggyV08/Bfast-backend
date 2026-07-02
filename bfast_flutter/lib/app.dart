@@ -4,9 +4,17 @@ import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'core/theme/app_theme.dart';
-import 'navigation/app_router.dart';
 import 'providers/auth_provider.dart';
 import 'providers/tap_provider.dart';
+import 'screens/auth/login_screen.dart';
+import 'screens/auth/register_screen.dart';
+import 'screens/home/home_screen.dart';
+import 'screens/home/transaction_history_screen.dart';
+import 'screens/payment/tap_detection_screen.dart';
+import 'screens/payment/payment_entry_screen.dart';
+import 'screens/payment/payment_incoming_screen.dart';
+import 'screens/payment/result_screen.dart';
+import 'screens/sensor_test/sensor_test_screen.dart';
 
 class BFastApp extends ConsumerStatefulWidget {
   const BFastApp({super.key});
@@ -24,7 +32,6 @@ class _BFastAppState extends ConsumerState<BFastApp>
     WidgetsBinding.instance.addObserver(this);
     _listenConnectivity();
     _listenBluetooth();
-    // Restore auth state from secure storage on every cold start.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(authProvider.notifier).checkAuth();
     });
@@ -36,8 +43,6 @@ class _BFastAppState extends ConsumerState<BFastApp>
     super.dispose();
   }
 
-  // ── App lifecycle → pause/resume BLE ─────────────────────────────────────
-
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final notifier = ref.read(tapProvider.notifier);
@@ -45,7 +50,6 @@ class _BFastAppState extends ConsumerState<BFastApp>
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
       case AppLifecycleState.hidden:
-        // Stop all BLE activity when app leaves foreground
         notifier.pauseForBackground();
       case AppLifecycleState.resumed:
         notifier.resumeFromBackground();
@@ -53,8 +57,6 @@ class _BFastAppState extends ConsumerState<BFastApp>
         break;
     }
   }
-
-  // ── Connectivity toasts ───────────────────────────────────────────────────
 
   void _listenConnectivity() {
     Connectivity().onConnectivityChanged.listen((results) {
@@ -71,7 +73,6 @@ class _BFastAppState extends ConsumerState<BFastApp>
         ref.read(tapProvider.notifier).reset();
       } else if (btState == BluetoothAdapterState.on) {
         _toast('Bluetooth enabled', Colors.green);
-        // Re-arm as receiver (or sender) now that BT is back on.
         ref.read(tapProvider.notifier).resumeFromBackground();
       }
     });
@@ -89,12 +90,23 @@ class _BFastAppState extends ConsumerState<BFastApp>
 
   @override
   Widget build(BuildContext context) {
-    final router = ref.watch(appRouterProvider);
-    return MaterialApp.router(
-      title:                   'BFast',
-      theme:                   AppTheme.dark,
-      routerConfig:            router,
+    return MaterialApp(
+      title:                      'BFast',
+      theme:                      AppTheme.dark,
       debugShowCheckedModeBanner: false,
+      home: const LoginScreen(),
+      routes: {
+        '/login':               (_) => const LoginScreen(),
+        '/register':            (_) => const RegisterScreen(),
+        '/home':                (_) => const HomeScreen(),
+        '/payment/sender':      (_) => const TapDetectionScreen(isSender: true),
+        '/payment/receiver':    (_) => const TapDetectionScreen(isSender: false),
+        '/payment/entry':       (_) => const PaymentEntryScreen(),
+        '/payment/incoming':    (_) => const PaymentIncomingScreen(),
+        '/payment/result':      (_) => const ResultScreen(),
+        '/sensor-test':         (_) => const SensorTestScreen(),
+        '/transaction-history': (_) => const TransactionHistoryScreen(),
+      },
     );
   }
 }

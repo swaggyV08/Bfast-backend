@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
+
 import '../../core/theme/app_theme.dart';
 import '../../providers/tap_provider.dart';
 import '../../services/ble_service.dart';
@@ -63,8 +63,9 @@ class _TapDetectionScreenState extends ConsumerState<TapDetectionScreen>
 
     // Auto-navigate sender to payment entry when tap confirmed
     ref.listen<TapState>(tapProvider, (prev, next) {
+      if (!context.mounted) return;
       if (next.phase == TapPhase.paymentReady && widget.isSender) {
-        context.push('/payment/entry');
+        Navigator.pushNamed(context, '/payment/entry');
       }
       if (next.phase == TapPhase.error) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -84,7 +85,7 @@ class _TapDetectionScreenState extends ConsumerState<TapDetectionScreen>
           icon: const Icon(Icons.arrow_back, color: Colors.white),
           onPressed: () {
             ref.read(tapProvider.notifier).reset();
-            context.pop();
+            Navigator.pop(context);
           },
         ),
         title: Text(
@@ -380,6 +381,7 @@ class _MultiReceiverView extends StatelessWidget {
       ),
       const SizedBox(height: 12),
       ...receivers.take(4).map((d) => Padding(
+        key: ValueKey(d.bleAddress),
         padding: const EdgeInsets.only(bottom: 10),
         child: Row(
           children: [

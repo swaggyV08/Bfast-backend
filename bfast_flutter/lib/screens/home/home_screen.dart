@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
+
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:fluttertoast/fluttertoast.dart';
@@ -88,10 +88,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     // Also re-arm as receiver whenever the protocol resets to idle (e.g. after
     // the user returns from the sender flow).
     ref.listen<TapState>(tapProvider, (_, next) {
-      if (next.phase == ProtocolPhase.mutualConfirmation && context.mounted) {
-        context.push('/payment/incoming');
+      if (!context.mounted) return;
+      if (next.phase == ProtocolPhase.mutualConfirmation) {
+        Navigator.pushNamed(context, '/payment/incoming');
       }
-      if (next.phase == ProtocolPhase.idle && mounted) {
+      if (next.phase == ProtocolPhase.idle) {
         ref.read(tapProvider.notifier).startAsReceiver();
       }
     });
@@ -108,13 +109,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             IconButton(
               icon: const Icon(Icons.sensors, color: AppTheme.textSecondary),
               tooltip: 'Sensor Test',
-              onPressed: () => context.push('/sensor-test'),
+              onPressed: () => Navigator.pushNamed(context, '/sensor-test'),
             ),
             IconButton(
               icon: const Icon(Icons.logout, color: AppTheme.textSecondary),
               onPressed: () async {
                 await ref.read(authProvider.notifier).logout();
-                if (context.mounted) context.go('/login');
+                if (context.mounted) Navigator.pushNamedAndRemoveUntil(context, '/login', (_) => false);
               },
             ),
           ],
@@ -150,7 +151,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   color:    AppTheme.primary,
                   onTap: () {
                     ref.read(tapProvider.notifier).reset();
-                    context.push('/payment/sender');
+                    Navigator.pushNamed(context, '/payment/sender');
                   },
                 ),
               ),
@@ -164,7 +165,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   label:    'Transaction History',
                   subtitle: 'View past payments',
                   color:    const Color(0xFF7C4DFF),
-                  onTap:    () => context.push('/transaction-history'),
+                  onTap:    () => Navigator.pushNamed(context, '/transaction-history'),
                 ),
               ),
               const SizedBox(height: 28),
@@ -280,10 +281,20 @@ class _WalletCard extends StatelessWidget {
                 ),
               ),
             ),
-            error: (_, __) => const Text(
-              '₹—',
-              style: TextStyle(color: Colors.white70, fontSize: 32,
-                  fontWeight: FontWeight.w700),
+            error: (_, __) => Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Text(
+                  '₹—',
+                  style: TextStyle(color: Colors.white70, fontSize: 32,
+                      fontWeight: FontWeight.w700),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh, color: Colors.white54, size: 20),
+                  tooltip: 'Retry',
+                  onPressed: onRefresh,
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 4),

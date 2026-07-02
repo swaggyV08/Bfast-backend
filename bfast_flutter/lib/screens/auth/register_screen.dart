@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
+
 import '../../core/theme/app_theme.dart';
 import '../../providers/auth_provider.dart';
 
@@ -32,9 +32,10 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
     final authState = ref.watch(authProvider);
 
     ref.listen<AuthState>(authProvider, (_, next) {
+      if (!context.mounted) return;
       if (next is AuthAuthenticated) {
         ref.read(authProvider.notifier).resetError();
-        context.go('/home');
+        Navigator.pushNamedAndRemoveUntil(context, '/home', (_) => false);
       }
     });
 
@@ -46,7 +47,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
         title: const Text('Create Account'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.pop(),
+          onPressed: () => Navigator.pop(context),
         ),
       ),
       body: SafeArea(
@@ -152,7 +153,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
 
                 Center(
                   child: TextButton(
-                    onPressed: () => context.pop(),
+                    onPressed: () => Navigator.pop(context),
                     child: const Text(
                       'Already have an account? Login',
                       style: TextStyle(color: AppTheme.primary),

@@ -10,6 +10,9 @@ import io.flutter.plugin.common.MethodChannel
 import java.nio.ByteBuffer
 import java.util.UUID
 
+// Service UUID for BFast BLE GATT — must match AppConstants.bleServiceUuid on the Flutter side.
+private val BFAST_SERVICE_UUID = ParcelUuid(UUID.fromString("0000FFF0-0000-1000-8000-00805F9B34FB"))
+
 /**
  * Handles BLE peripheral advertising for BOTH sender and receiver roles.
  *
@@ -93,9 +96,13 @@ class BleAdvertiseHandler(private val context: Context) : MethodChannel.MethodCa
             .addManufacturerData(BFAST_MFG_ID, mfgPayload)
             .build()
 
-        // Scan response carries human-readable name
+        // Scan response: device name + service UUID FFF0.
+        // The service UUID here is what iOS CoreBluetooth's withServices filter
+        // matches when scanning. Without it, iOS foreground+background scanning
+        // never discovers Android receivers.
         val scanResponse = AdvertiseData.Builder()
             .setIncludeDeviceName(true)
+            .addServiceUuid(BFAST_SERVICE_UUID)
             .build()
 
         val roleTag  = if (isSender) "S" else "R"

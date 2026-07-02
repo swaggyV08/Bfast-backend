@@ -1,6 +1,7 @@
 import Foundation
 import Flutter
 import CoreBluetooth
+import os.log
 
 /// BLE peripheral advertising for the SENDER role on iOS.
 ///
@@ -98,7 +99,10 @@ class BleAdvertiseHandler: NSObject {
     private func startSenderAdvertising(deviceId: String, displayName: String) {
         pendingSenderAd = (deviceId, displayName)
         if senderPeripheralMgr == nil {
-            senderPeripheralMgr = CBPeripheralManager(delegate: self, queue: nil)
+            // Use a dedicated background queue so AirDrop UI activity on the main
+            // thread cannot delay our CBPeripheralManagerDelegate callbacks.
+            let queue = DispatchQueue(label: "com.bfast.ble.sender", qos: .userInitiated)
+            senderPeripheralMgr = CBPeripheralManager(delegate: self, queue: queue)
         }
         if senderPeripheralMgr?.state == .poweredOn {
             doAdvertiseSender()
@@ -125,8 +129,13 @@ class BleAdvertiseHandler: NSObject {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    private static let logger = OSLog(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.bfast.app",
+        category: "BleAdvertise"
+    )
+
     private func log(_ msg: String) {
-        print("[\(BleAdvertiseHandler.tag)] \(msg)")
+        os_log("%{private}@", log: BleAdvertiseHandler.logger, type: .debug, msg)
     }
 }
 
@@ -145,7 +154,12 @@ extension BleAdvertiseHandler: CBPeripheralManagerDelegate {
                                               error: Error?) {
         guard peripheral === senderPeripheralMgr else { return }
         if let err = error {
-            log("sender advertising failed: \(err.localizedDescription)")
+            log("sender advertising failed: \(err.localizedDescription) — will retry on next poweredOn")
+            // pendingSenderAd is still set; doAdvertiseSender() will be called
+            // again when peripheralManagerDidUpdateState fires with .poweredOn
+            // after the system (AirDrop, Handoff) releases the BLE radio slot.
+        } else {
+            log("sender advertising started successfully")
         }
     }
 }

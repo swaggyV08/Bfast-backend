@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
+
 import '../../core/theme/app_theme.dart';
 import '../../providers/tap_provider.dart';
 import '../../providers/auth_provider.dart';
@@ -47,8 +47,10 @@ class _PaymentIncomingScreenState extends ConsumerState<PaymentIncomingScreen>
     try {
       final api = ref.read(apiServiceProvider);
       final res = await api.getWallet();
-      _initialBalance = ((res['data']?['balance'] ?? 0) as num).toDouble();
-    } catch (_) {}
+      _initialBalance = (((res['data']?['balancePaise'] ?? 0) as num) / 100).toDouble();
+    } catch (e) {
+      debugPrint('[BFast][incoming] initBalance failed: $e');
+    }
 
     _pollTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) => _pollBalance());
   }
@@ -58,20 +60,25 @@ class _PaymentIncomingScreenState extends ConsumerState<PaymentIncomingScreen>
     try {
       final api = ref.read(apiServiceProvider);
       final res = await api.getWallet();
-      final balance = ((res['data']?['balance'] ?? 0) as num).toDouble();
-      final initial = _initialBalance ?? balance;
+      final balance = (((res['data']?['balancePaise'] ?? 0) as num) / 100).toDouble();
 
-      if (balance > initial + 0.01) {
+      // Compare in paise to avoid float precision issues
+      final initialPaise = ((_initialBalance ?? balance) * 100).round();
+      final balancePaise = (balance * 100).round();
+      if (balancePaise > initialPaise) {
+        _pollTimer?.cancel();
+        if (!mounted) return;
         setState(() {
           _paymentReceived = true;
-          _receivedAmount  = balance - initial;
+          _receivedAmount  = balance - (_initialBalance ?? balance);
         });
-        _pollTimer?.cancel();
-        // Navigate to result after brief celebration delay
         await Future.delayed(const Duration(seconds: 2));
-        if (mounted) context.go('/home');
+        if (!mounted) return;
+        Navigator.pushNamedAndRemoveUntil(context, '/home', (_) => false);
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[BFast][incoming] pollBalance failed: $e');
+    }
   }
 
   @override
@@ -84,7 +91,7 @@ class _PaymentIncomingScreenState extends ConsumerState<PaymentIncomingScreen>
   @override
   Widget build(BuildContext context) {
     final tapState   = ref.watch(tapProvider);
-    final senderName = tapState.selectedReceiver?.displayName ?? 'Someone';
+    final senderName = tapState.peerDisplayName ?? 'User';
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -145,7 +152,7 @@ class _PaymentIncomingScreenState extends ConsumerState<PaymentIncomingScreen>
       TextButton(
         onPressed: () {
           ref.read(tapProvider.notifier).startAsReceiver();
-          context.pop();
+          Navigator.pop(context);
         },
         child: const Text('Cancel', style: TextStyle(color: AppTheme.textSecondary)),
       ),

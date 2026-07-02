@@ -13,22 +13,22 @@ import UIKit
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
         GeneratedPluginRegistrant.register(with: self)
+        let result = super.application(application, didFinishLaunchingWithOptions: launchOptions)
 
         guard let controller = window?.rootViewController as? FlutterViewController else {
-            return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+            return result
         }
-
         let messenger = controller.binaryMessenger
 
-        // GattServerHandler must be initialised first — BleAdvertiseHandler holds
-        // a weak reference to it so it can store receiver advertising info.
-        let gatt     = GattServerHandler(messenger: messenger)
-        gattHandler  = gatt
+        let gatt    = GattServerHandler(messenger: messenger)
+        gattHandler = gatt
 
-        uwbHandler   = UwbChannelHandler(messenger: messenger)
-        bleHandler   = BleAdvertiseHandler(messenger: messenger, gattHandler: gatt)
+        if #available(iOS 14.0, *) {
+            uwbHandler = UwbChannelHandler(messenger: messenger)
+        }
+        bleHandler = BleAdvertiseHandler(messenger: messenger, gattHandler: gatt)
 
-        return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+        return result
     }
 
     override func applicationWillTerminate(_ application: UIApplication) {

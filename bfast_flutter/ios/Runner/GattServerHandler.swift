@@ -1,6 +1,7 @@
 import Foundation
 import Flutter
 import CoreBluetooth
+import os.log
 
 /// iOS GATT server — protocol-identical to Android's GattServerHandler.kt.
 ///
@@ -48,7 +49,7 @@ class GattServerHandler: NSObject {
 
     // ── Watchdog: fires if Android sender drops without unsubscribing ────────
     private var watchdogTimer: Timer?
-    private static let watchdogInterval: TimeInterval = 35
+    private static let watchdogInterval: TimeInterval = 60
 
     // ── Init ─────────────────────────────────────────────────────────────────
 
@@ -127,7 +128,7 @@ class GattServerHandler: NSObject {
         // Reset session state for a fresh server instance
         connectedCentralId = nil
         sessionActive      = false
-        watchdogTimer?.invalidate()
+        cancelWatchdog()
 
         // FFF2: WRITE + WRITE_NO_RESPONSE  (sender writes all protocol messages here)
         let hsChar = CBMutableCharacteristic(
@@ -156,8 +157,7 @@ class GattServerHandler: NSObject {
     }
 
     func stopServer() {
-        watchdogTimer?.invalidate()
-        watchdogTimer = nil
+        cancelWatchdog()
         peripheralManager?.stopAdvertising()
         peripheralManager?.removeAllServices()
         connectedCentralId = nil
@@ -190,15 +190,29 @@ class GattServerHandler: NSObject {
     // ── Watchdog: fallback disconnect for Android senders (no NOTIFY sub) ───
 
     private func resetWatchdog() {
-        watchdogTimer?.invalidate()
-        watchdogTimer = Timer.scheduledTimer(
-            withTimeInterval: GattServerHandler.watchdogInterval,
-            repeats: false
-        ) { [weak self] _ in
-            guard let self, let id = self.connectedCentralId else { return }
-            self.log("watchdog: no writes for \(Int(GattServerHandler.watchdogInterval))s — emitting disconnected")
-            self.connectedCentralId = nil
-            self.emit(["type": "disconnected", "deviceAddress": id])
+        // Timer must be created and invalidated on the same thread with an active
+        // RunLoop. The peripheral delegate queue has no RunLoop, so cross-thread
+        // invalidation causes EXC_BAD_ACCESS. Dispatch to main — the only queue
+        // guaranteed to have a RunLoop at all times.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.watchdogTimer?.invalidate()
+            self.watchdogTimer = Timer.scheduledTimer(
+                withTimeInterval: GattServerHandler.watchdogInterval,
+                repeats: false
+            ) { [weak self] _ in
+                guard let self, let id = self.connectedCentralId else { return }
+                self.log("watchdog: no writes for \(Int(GattServerHandler.watchdogInterval))s — emitting disconnected")
+                self.connectedCentralId = nil
+                self.emit(["type": "disconnected", "deviceAddress": id])
+            }
+        }
+    }
+
+    private func cancelWatchdog() {
+        DispatchQueue.main.async { [weak self] in
+            self?.watchdogTimer?.invalidate()
+            self?.watchdogTimer = nil
         }
     }
 
@@ -210,8 +224,13 @@ class GattServerHandler: NSObject {
         }
     }
 
+    private static let logger = OSLog(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.bfast.app",
+        category: "GattServer"
+    )
+
     private func log(_ msg: String) {
-        print("[\(GattServerHandler.tag)] \(msg)")
+        os_log("%{private}@", log: GattServerHandler.logger, type: .debug, msg)
     }
 }
 
@@ -226,6 +245,10 @@ extension GattServerHandler: CBPeripheralManagerDelegate {
             if pendingStart {
                 pendingStart = false
                 buildAndAddService()
+            } else if responseChar != nil && !peripheral.isAdvertising {
+                // Radio regained after AirDrop/system preemption — restart advertising.
+                log("radio regained — restarting advertising")
+                startAdvertising()
             }
         case .poweredOff:
             log("poweredOff")
@@ -251,8 +274,12 @@ extension GattServerHandler: CBPeripheralManagerDelegate {
     func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager,
                                               error: Error?) {
         if let err = error {
-            log("advertising failed: \(err.localizedDescription)")
+            log("advertising failed: \(err.localizedDescription) — will retry when radio is available")
+            // Mark pendingStart so peripheralManagerDidUpdateState restarts advertising
+            // once the system (AirDrop, Handoff, etc.) releases the BLE radio slot.
+            pendingStart = true
         } else {
+            pendingStart = false
             log("advertising started")
         }
     }
@@ -367,8 +394,7 @@ extension GattServerHandler: CBPeripheralManagerDelegate {
         let centralId = central.identifier.uuidString
         guard connectedCentralId == centralId else { return }
         log("central \(centralId) unsubscribed from FFF3 — disconnected")
-        watchdogTimer?.invalidate()
-        watchdogTimer = nil
+        cancelWatchdog()
         connectedCentralId = nil
         emit(["type": "disconnected", "deviceAddress": centralId])
     }

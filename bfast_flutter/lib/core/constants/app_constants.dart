@@ -2,7 +2,13 @@ class AppConstants {
   AppConstants._();
 
   // ── Backend ──────────────────────────────────────────────────────────
-  static const String baseUrl = 'http://192.168.88.13:3000/api/v1';
+  static const String baseUrl = String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue: 'https://api.bfast.com/api/v1',
+  );
+
+  // ── Payment limits ────────────────────────────────────────────────────
+  static const double maxPaymentInr = 100000.0; // ₹1,00,000
 
   // ── BLE UUIDs ────────────────────────────────────────────────────────
   static const String bleServiceUuid      = '0000FFF0-0000-1000-8000-00805F9B34FB';

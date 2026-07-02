@@ -17,8 +17,22 @@ class UwbChannelHandler: NSObject {
     private let eventChannel:  FlutterEventChannel
     private var eventSink: FlutterEventSink?
 
+    private var _niSessionAny: Any? = nil
+    private let _sessionLock = NSLock()
+
     @available(iOS 14.0, *)
-    private lazy var niSession: NISession? = nil
+    private var niSession: NISession? {
+        get {
+            _sessionLock.lock()
+            defer { _sessionLock.unlock() }
+            return _niSessionAny as? NISession
+        }
+        set {
+            _sessionLock.lock()
+            defer { _sessionLock.unlock() }
+            _niSessionAny = newValue
+        }
+    }
 
     // ── Init ─────────────────────────────────────────────────────────────────
 
@@ -160,8 +174,13 @@ extension UwbChannelHandler: NISessionDelegate {
     }
 
     func session(_ session: NISession, didInvalidateWith error: Error) {
+        // Capture sink before the async dispatch; onCancel may nil it between now
+        // and when the block executes, which would call FlutterEventSink after
+        // cancellation — undefined behaviour in the Flutter engine.
         DispatchQueue.main.async { [weak self] in
-            self?.eventSink?(FlutterEndOfEventStream)
+            guard let self, let sink = self.eventSink else { return }
+            sink(FlutterEndOfEventStream)
+            self.eventSink = nil
         }
     }
 

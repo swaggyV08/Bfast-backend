@@ -1,5 +1,8 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../core/constants/app_constants.dart';
 
@@ -17,11 +20,11 @@ class ApiService {
     ));
 
     _dio.interceptors.add(_AuthInterceptor(_storage));
-    _dio.interceptors.add(LogInterceptor(
-      requestBody:  true,
-      responseBody: true,
-      error:        true,
-    ));
+    _dio.interceptors.add(_RefreshInterceptor(_storage, _dio));
+    _dio.interceptors.add(_RetryInterceptor(_dio));
+    if (kDebugMode) {
+      _dio.interceptors.add(_MaskedLogInterceptor());
+    }
   }
 
   // ── Auth ─────────────────────────────────────────────────────────────────
@@ -105,14 +108,18 @@ class ApiService {
     required String receiverDeviceId,
     required double amountInr,
   }) async {
-    final res = await _dio.post('/transaction', data: {
-      'sessionCodeId':    sessionCodeId,
-      'receiverDeviceId': receiverDeviceId,
-      'amountPaise':      (amountInr * 100).round(),
-      'nonce':            _generateNonce(),
-      'currency':         'INR',
-      'clientInitiatedAt': DateTime.now().toIso8601String(),
-    });
+    final nonce = _generateNonce();
+    final res = await _dio.post('/transaction',
+      data: {
+        'sessionCodeId':     sessionCodeId,
+        'receiverDeviceId':  receiverDeviceId,
+        'amountPaise':       (amountInr * 100).round(),
+        'nonce':             nonce,
+        'currency':          'INR',
+        'clientInitiatedAt': DateTime.now().toIso8601String(),
+      },
+      options: Options(headers: {'Idempotency-Key': nonce}),
+    );
     return _unwrap(res);
   }
 
@@ -124,8 +131,6 @@ class ApiService {
 
   // ── Token management ─────────────────────────────────────────────────────
 
-  // Cached after first read; set eagerly on login/logout so all GoRouter
-  // redirect calls (which are async but hot-path) return a pre-resolved Future.
   bool? _loggedInCache;
 
   Future<void> saveTokens(String access, String refresh) async {
@@ -137,6 +142,25 @@ class ApiService {
   }
 
   Future<String?> getAccessToken() => _storage.read(key: 'access_token');
+
+  /// Returns true if the stored access token expires within [thresholdSeconds].
+  /// Proactively call this before a payment to force refresh if needed.
+  Future<bool> isTokenExpiringSoon({int thresholdSeconds = 60}) async {
+    try {
+      final token = await _storage.read(key: 'access_token');
+      if (token == null) return true;
+      final parts = token.split('.');
+      if (parts.length != 3) return false;
+      final payload = utf8.decode(base64Url.decode(base64Url.normalize(parts[1])));
+      final data    = jsonDecode(payload) as Map<String, dynamic>;
+      final exp     = data['exp'] as int?;
+      if (exp == null) return false;
+      final expiresAt = DateTime.fromMillisecondsSinceEpoch(exp * 1000);
+      return DateTime.now().add(Duration(seconds: thresholdSeconds)).isAfter(expiresAt);
+    } catch (_) {
+      return false;
+    }
+  }
 
   Future<void> clearTokens() async {
     _loggedInCache = false;
@@ -158,6 +182,8 @@ class ApiService {
     return data;
   }
 }
+
+// ── Auth interceptor: attaches Bearer token to every request ────────────────
 
 class _AuthInterceptor extends Interceptor {
   final FlutterSecureStorage _storage;
@@ -186,5 +212,197 @@ class _AuthInterceptor extends Interceptor {
       ));
     }
     handler.next(err);
+  }
+}
+
+// ── Refresh interceptor: on 401 → refresh tokens → retry original ────────────
+
+class _RefreshInterceptor extends Interceptor {
+  final FlutterSecureStorage _storage;
+  final Dio _dio;
+
+  // When a refresh is in flight, new 401s wait on this completer instead of
+  // triggering a second refresh. The completer resolves with the new token
+  // (or null on failure) so waiters can retry their original request.
+  Completer<String?>? _refreshCompleter;
+
+  _RefreshInterceptor(this._storage, this._dio);
+
+  @override
+  Future<void> onError(DioException err, ErrorInterceptorHandler handler) async {
+    final statusCode = err.response?.statusCode;
+    if (statusCode != 401) {
+      handler.next(err);
+      return;
+    }
+
+    // Another 401 arrived while a refresh is already in progress — queue it.
+    if (_refreshCompleter != null) {
+      final newToken = await _refreshCompleter!.future;
+      if (newToken == null) {
+        handler.next(err);
+        return;
+      }
+      final opts = err.requestOptions;
+      opts.headers['Authorization'] = 'Bearer $newToken';
+      try {
+        final retryRes = await _dio.request<dynamic>(
+          opts.path,
+          data:            opts.data,
+          queryParameters: opts.queryParameters,
+          options: Options(method: opts.method, headers: opts.headers),
+        );
+        handler.resolve(retryRes);
+      } on DioException catch (e) {
+        handler.next(e);
+      }
+      return;
+    }
+
+    _refreshCompleter = Completer<String?>();
+    try {
+      final refreshToken = await _storage.read(key: 'refresh_token');
+      if (refreshToken == null) {
+        _refreshCompleter!.complete(null);
+        await _clearAndReject(handler, err);
+        return;
+      }
+
+      final refreshDio = Dio(BaseOptions(
+        baseUrl:        AppConstants.baseUrl,
+        connectTimeout: const Duration(seconds: 15),
+        headers:        {'Content-Type': 'application/json'},
+      ));
+      final refreshRes = await refreshDio.post('/auth/mobile/refresh', data: {
+        'refreshToken': refreshToken,
+      });
+
+      final resData    = refreshRes.data as Map<String, dynamic>?;
+      final tokens     = (resData?['data'] as Map<String, dynamic>?)?['tokens']
+          as Map<String, dynamic>?;
+      final newAccess  = tokens?['accessToken']  as String?;
+      final newRefresh = tokens?['refreshToken'] as String?;
+
+      if (newAccess == null) {
+        _refreshCompleter!.complete(null);
+        await _clearAndReject(handler, err);
+        return;
+      }
+
+      await Future.wait([
+        _storage.write(key: 'access_token', value: newAccess),
+        if (newRefresh != null)
+          _storage.write(key: 'refresh_token', value: newRefresh),
+      ]);
+
+      _refreshCompleter!.complete(newAccess);
+
+      final opts = err.requestOptions;
+      opts.headers['Authorization'] = 'Bearer $newAccess';
+      final retryRes = await _dio.request<dynamic>(
+        opts.path,
+        data:            opts.data,
+        queryParameters: opts.queryParameters,
+        options: Options(method: opts.method, headers: opts.headers),
+      );
+      handler.resolve(retryRes);
+    } catch (e) {
+      _refreshCompleter?.complete(null);
+      await _storage.deleteAll();
+      handler.next(err);
+    } finally {
+      _refreshCompleter = null;
+    }
+  }
+
+  Future<void> _clearAndReject(
+    ErrorInterceptorHandler handler, DioException err,
+  ) async {
+    await _storage.deleteAll();
+    handler.next(err);
+  }
+}
+
+// ── Retry interceptor: exponential backoff on transient network failures ──────
+
+class _RetryInterceptor extends Interceptor {
+  final Dio _dio;
+  static const _maxRetries   = 3;
+  static const _initialDelay = 200; // ms
+
+  _RetryInterceptor(this._dio);
+
+  @override
+  Future<void> onError(DioException err, ErrorInterceptorHandler handler) async {
+    final retryCount = err.requestOptions.extra['_retry'] as int? ?? 0;
+    final isRetryable = err.type == DioExceptionType.connectionTimeout ||
+        err.type == DioExceptionType.connectionError  ||
+        err.type == DioExceptionType.sendTimeout      ||
+        err.type == DioExceptionType.receiveTimeout;
+
+    if (!isRetryable || retryCount >= _maxRetries) {
+      handler.next(err);
+      return;
+    }
+
+    final delayMs = _initialDelay * (1 << retryCount); // 200 → 400 → 800
+    await Future.delayed(Duration(milliseconds: delayMs));
+
+    try {
+      final opts = err.requestOptions;
+      opts.extra['_retry'] = retryCount + 1;
+      final res = await _dio.request<dynamic>(
+        opts.path,
+        data:            opts.data,
+        queryParameters: opts.queryParameters,
+        options:         Options(method: opts.method, headers: opts.headers, extra: opts.extra),
+      );
+      handler.resolve(res);
+    } on DioException catch (e) {
+      handler.next(e);
+    }
+  }
+}
+
+// ── Debug-only log interceptor: masks sensitive fields ───────────────────────
+
+class _MaskedLogInterceptor extends Interceptor {
+  @override
+  void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
+    final maskedHeaders = Map<String, dynamic>.from(options.headers);
+    if (maskedHeaders.containsKey('Authorization')) {
+      maskedHeaders['Authorization'] = 'Bearer ***';
+    }
+    debugPrint('[Dio] --> ${options.method} ${options.path}  headers:$maskedHeaders');
+    if (options.data != null) {
+      debugPrint('[Dio]     body: ${_mask(options.data)}');
+    }
+    handler.next(options);
+  }
+
+  @override
+  void onResponse(Response response, ResponseInterceptorHandler handler) {
+    debugPrint('[Dio] <-- ${response.statusCode} ${response.requestOptions.path}');
+    debugPrint('[Dio]     body: ${_mask(response.data)}');
+    handler.next(response);
+  }
+
+  @override
+  void onError(DioException err, ErrorInterceptorHandler handler) {
+    debugPrint('[Dio] ERR ${err.requestOptions.path}: ${err.message}');
+    handler.next(err);
+  }
+
+  static const _sensitiveKeys = {
+    'accessToken', 'refreshToken', 'passcode', 'token', 'password',
+  };
+
+  dynamic _mask(dynamic data) {
+    if (data is Map) {
+      return data.map((k, v) => _sensitiveKeys.contains(k)
+          ? MapEntry(k, '***')
+          : MapEntry(k, _mask(v)));
+    }
+    return data;
   }
 }

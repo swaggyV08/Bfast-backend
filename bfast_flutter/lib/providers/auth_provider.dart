@@ -1,3 +1,5 @@
+import 'dart:io';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:uuid/uuid.dart';
@@ -36,35 +38,78 @@ class AuthNotifier extends StateNotifier<AuthState> {
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
   final Uuid _uuid = const Uuid();
 
+  int _failedAttempts = 0;
+  DateTime? _lockoutUntil;
+
   AuthNotifier(this._api) : super(const AuthIdle());
 
+  // Regex for valid UUID format (backend validates deviceId against this).
+  static final _uuidPattern = RegExp(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+    caseSensitive: false,
+  );
+
   Future<String> _getOrCreateDeviceId() async {
-    final existing = await _storage.read(key: 'device_id');
-    if (existing != null) return existing;
-    final newId = _uuid.v4();
-    await _storage.write(key: 'device_id', value: newId);
-    return newId;
+    try {
+      final existing = await _storage.read(key: 'device_id');
+      if (existing != null && existing.isNotEmpty) return existing;
+
+      final info = DeviceInfoPlugin();
+      String? stableId;
+      if (Platform.isAndroid) {
+        stableId = (await info.androidInfo).id;
+      } else if (Platform.isIOS) {
+        stableId = (await info.iosInfo).identifierForVendor;
+      }
+
+      final String newId;
+      if (stableId != null && stableId.isNotEmpty) {
+        // iOS identifierForVendor is already a UUID — use it directly.
+        // Android .id is a short hex string (e.g. "e56b4cef05e19c5a"), NOT a UUID.
+        // Convert it to a deterministic UUID v5 so backend UUID validation passes.
+        newId = _uuidPattern.hasMatch(stableId)
+            ? stableId.toLowerCase()
+            : _uuid.v5(Namespace.url.value, 'bfast:device:$stableId');
+      } else {
+        newId = _uuid.v4();
+      }
+
+      await _storage.write(key: 'device_id', value: newId);
+      return newId;
+    } catch (e) {
+      return _uuid.v4();
+    }
   }
 
   Future<void> checkAuth() async {
-    final isLoggedIn = await _api.isLoggedIn();
-    if (!isLoggedIn) {
+    try {
+      final isLoggedIn = await _api.isLoggedIn();
+      if (!isLoggedIn) {
+        state = const AuthIdle();
+        return;
+      }
+      final name   = await _storage.read(key: 'display_name') ?? '';
+      final phone  = await _storage.read(key: 'phone_number') ?? '';
+      final userId = await _storage.read(key: 'user_id') ?? '';
+      state = AuthAuthenticated(UserModel(
+        id:            userId,
+        phoneNumber:   phone,
+        displayName:   name,
+        walletBalance: 0.0,
+      ));
+    } catch (e) {
       state = const AuthIdle();
-      return;
     }
-    // Restore cached user
-    final name    = await _storage.read(key: 'display_name') ?? 'User';
-    final phone   = await _storage.read(key: 'phone_number') ?? '';
-    final userId  = await _storage.read(key: 'user_id') ?? '';
-    state = AuthAuthenticated(UserModel(
-      id:            userId,
-      phoneNumber:   phone,
-      displayName:   name,
-      walletBalance: 0.0,
-    ));
   }
 
   Future<void> login(String phoneNumber, String passcode) async {
+    // Rate limiting: lock out after 5 consecutive failures for 30 seconds.
+    if (_lockoutUntil != null && DateTime.now().isBefore(_lockoutUntil!)) {
+      final remaining = _lockoutUntil!.difference(DateTime.now()).inSeconds;
+      state = AuthError('Too many failed attempts. Please wait ${remaining}s.');
+      return;
+    }
+
     // Input validation
     if (phoneNumber.trim().isEmpty) {
       state = const AuthError('Please enter your phone number to log in.');
@@ -82,29 +127,42 @@ class AuthNotifier extends StateNotifier<AuthState> {
       final response   = await _api.login(formatted, passcode, deviceId);
 
       if (response['success'] == true) {
-        final data   = response['data'] as Map<String, dynamic>;
-        final tokens = data['tokens'] as Map<String, dynamic>;
-        final user   = data['user']   as Map<String, dynamic>;
+        final data   = response['data']         as Map<String, dynamic>? ?? {};
+        final tokens = data['tokens']           as Map<String, dynamic>? ?? {};
+        final user   = data['user']             as Map<String, dynamic>? ?? {};
+        final access  = tokens['accessToken']   as String?;
+        final refresh = tokens['refreshToken']  as String?;
+        if (access == null || user['id'] == null) {
+          state = const AuthError('Unexpected server response. Please try again.');
+          return;
+        }
+        await _api.saveTokens(access, refresh ?? '');
+        await _storage.write(key: 'user_id',      value: user['id']          as String? ?? '');
+        await _storage.write(key: 'display_name', value: user['displayName'] as String? ?? '');
+        await _storage.write(key: 'phone_number', value: user['phoneNumber'] as String? ?? '');
 
-        await _api.saveTokens(
-          tokens['accessToken']  as String,
-          tokens['refreshToken'] as String,
-        );
-        await _storage.write(key: 'user_id',       value: user['id'] as String);
-        await _storage.write(key: 'display_name',  value: user['displayName'] as String);
-        await _storage.write(key: 'phone_number',  value: user['phoneNumber'] as String);
-
+        _failedAttempts = 0;
+        _lockoutUntil   = null;
         state = AuthAuthenticated(UserModel(
-          id:            user['id']           as String,
-          phoneNumber:   user['phoneNumber']  as String,
-          displayName:   user['displayName']  as String,
+          id:            user['id']           as String? ?? '',
+          phoneNumber:   user['phoneNumber']  as String? ?? '',
+          displayName:   user['displayName']  as String? ?? '',
           walletBalance: 0.0,
         ));
       } else {
+        _onLoginFailure();
         state = AuthError(_parseError(response));
       }
     } on Exception catch (e) {
+      _onLoginFailure();
       state = AuthError(_friendlyError(e));
+    }
+  }
+
+  void _onLoginFailure() {
+    _failedAttempts++;
+    if (_failedAttempts >= 5) {
+      _lockoutUntil = DateTime.now().add(const Duration(seconds: 30));
     }
   }
 
@@ -137,22 +195,24 @@ class AuthNotifier extends StateNotifier<AuthState> {
       );
 
       if (response['success'] == true) {
-        final data   = response['data'] as Map<String, dynamic>;
-        final tokens = data['tokens'] as Map<String, dynamic>;
-        final user   = data['user']   as Map<String, dynamic>;
-
-        await _api.saveTokens(
-          tokens['accessToken']  as String,
-          tokens['refreshToken'] as String,
-        );
-        await _storage.write(key: 'user_id',      value: user['id']          as String);
-        await _storage.write(key: 'display_name', value: user['displayName'] as String);
-        await _storage.write(key: 'phone_number', value: user['phoneNumber'] as String);
+        final data   = response['data']        as Map<String, dynamic>? ?? {};
+        final tokens = data['tokens']          as Map<String, dynamic>? ?? {};
+        final user   = data['user']            as Map<String, dynamic>? ?? {};
+        final access  = tokens['accessToken']  as String?;
+        final refresh = tokens['refreshToken'] as String?;
+        if (access == null || user['id'] == null) {
+          state = const AuthError('Unexpected server response. Please try again.');
+          return;
+        }
+        await _api.saveTokens(access, refresh ?? '');
+        await _storage.write(key: 'user_id',      value: user['id']          as String? ?? '');
+        await _storage.write(key: 'display_name', value: user['displayName'] as String? ?? '');
+        await _storage.write(key: 'phone_number', value: user['phoneNumber'] as String? ?? '');
 
         state = AuthAuthenticated(UserModel(
-          id:            user['id']           as String,
-          phoneNumber:   user['phoneNumber']  as String,
-          displayName:   user['displayName']  as String,
+          id:            user['id']           as String? ?? '',
+          phoneNumber:   user['phoneNumber']  as String? ?? '',
+          displayName:   user['displayName']  as String? ?? '',
           walletBalance: 0.0,
         ));
       } else {
@@ -187,12 +247,15 @@ class AuthNotifier extends StateNotifier<AuthState> {
     if (msg.contains('401') || msg.contains('unauthorized')) {
       return 'Incorrect phone number or passcode. Please try again.';
     }
+    if (msg.contains('400')) {
+      return 'Invalid request. Please check your phone number format (+91XXXXXXXXXX) and try again.';
+    }
     if (msg.contains('404')) {
       return "We couldn't find an account with this phone number.";
     }
     if (msg.contains('409')) {
       return 'An account with this phone number already exists.';
     }
-    return 'Something went wrong: ${e.toString().replaceAll('Exception: ', '')}';
+    return 'Something went wrong. Please try again.';
   }
 }

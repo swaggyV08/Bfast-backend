@@ -65,6 +65,7 @@ class BleService {
   final StreamController<List<BleDeviceInfo>> _receiversCtrl =
       StreamController<List<BleDeviceInfo>>.broadcast();
   Stream<List<BleDeviceInfo>> get nearbyReceiversStream => _receiversCtrl.stream;
+  BleDeviceInfo? _lastEmittedClosest;
 
   // Devices that sent back a busy rejection; excluded from scan results
   // until `clearBusySkipList` is called (e.g., on reset).
@@ -129,14 +130,18 @@ class BleService {
 
     try { await _gattChannel.invokeMethod('startGattServer'); } catch (_) {}
 
-    _gattEventSub?.cancel();
-    _gattEventSub = _gattEvents.receiveBroadcastStream().listen((event) {
-      final map = (event as Map).cast<String, dynamic>();
-      if (map['type'] == 'busy_rejected') {
-        _busyDevices.add(map['deviceAddress'] as String? ?? '');
-      }
-      _gattServerCtrl.add(map);
-    });
+    // Guard against double subscription: EventChannel throws PlatformException
+    // ("already active") on Android if the previous onCancel fires asynchronously
+    // after the new listen() call arrives at the native layer.
+    if (_gattEventSub == null) {
+      _gattEventSub = _gattEvents.receiveBroadcastStream().listen((event) {
+        final map = (event as Map).cast<String, dynamic>();
+        if (map['type'] == 'busy_rejected') {
+          _busyDevices.add(map['deviceAddress'] as String? ?? '');
+        }
+        _gattServerCtrl.add(map);
+      });
+    }
   }
 
   Future<void> stopReceiver() async {
@@ -180,7 +185,11 @@ class BleService {
     if (_isScanning) return;
     await requestBlePermissions();
     _isScanning = true;
+    // withServices filter: required for iOS background scanning (CoreBluetooth
+    // only scans in background when a specific service UUID is given).
+    // Android also benefits: faster discovery by filtering at radio layer.
     await FlutterBluePlus.startScan(
+      withServices:      [Guid(AppConstants.bleServiceUuid)],
       continuousUpdates: true,
       removeIfGone:      const Duration(seconds: 4),
     );
@@ -228,6 +237,14 @@ class BleService {
         .where((d) => d.role == 'receiver' && !_busyDevices.contains(d.bleAddress))
         .toList()
       ..sort((a, b) => b.rssi.compareTo(a.rssi));
+
+    // Debounce: only emit if the closest device changed or RSSI shifted > 5 dBm
+    final closest = receivers.isNotEmpty ? receivers.first : null;
+    final last    = _lastEmittedClosest;
+    final changed = closest?.bleAddress != last?.bleAddress ||
+        (closest != null && last != null && (closest.rssi - last.rssi).abs() > 5);
+    if (!changed) return;
+    _lastEmittedClosest = closest;
     _receiversCtrl.add(List.unmodifiable(receivers));
   }
 
@@ -278,14 +295,21 @@ class BleService {
         return false;
       }
 
+      // Verify the negotiated MTU is large enough for ECDH payloads (~200 bytes).
+      final actualMtu = await device.mtu.first;
+      if (actualMtu < 100) {
+        debugPrint('[BFAST][BLE] MTU too small: $actualMtu — disconnecting');
+        await disconnect();
+        return false;
+      }
+      debugPrint('[BFAST][BLE] MTU negotiated: $actualMtu bytes');
+
       // iOS only: subscribe to FFF3 NOTIFY so the iOS receiver's GattServerHandler
       // can detect when this central disconnects (via didUnsubscribeFrom callback).
       // The subscription carries no data — we still poll via READ.
       // On Android receivers FFF3 is READ-only; setNotifyValue will throw and
       // the catch swallows it silently.
-      if (Platform.isIOS &&
-          (_responseChar!.properties
-              .contains(BluetoothCharacteristicProperty.notify))) {
+      if (Platform.isIOS && _responseChar!.properties.notify) {
         try {
           await _responseChar!.setNotifyValue(true);
           debugPrint('[BFAST][BLE] subscribed to FFF3 NOTIFY (iOS disconnect detection)');
@@ -342,7 +366,7 @@ class BleService {
   }) async {
     final deadline = DateTime.now().add(Duration(milliseconds: timeoutMs));
     while (DateTime.now().isBefore(deadline)) {
-      await Future.delayed(const Duration(milliseconds: 100));
+      await Future.delayed(const Duration(milliseconds: 50));
       try {
         final val = await _responseChar?.read() ?? [];
         // val[0]=seqNum, val[1]=msgType, val[2:]=payload
@@ -364,12 +388,20 @@ class BleService {
   }
 
   /// Read FFF3 once and return the raw bytes.
+  /// Throws [StateError] if the characteristic is gone (disconnected).
   Future<List<int>> senderReadResponse() async {
     try {
       return await _responseChar?.read() ?? [];
-    } catch (_) {
-      return [];
+    } catch (e) {
+      throw StateError('BLE read failed — likely disconnected: $e');
     }
+  }
+
+  /// Write a null keep-alive byte to FFF2 so the iOS GATT watchdog resets.
+  Future<void> senderWriteKeepAlive() async {
+    final char = _handshakeChar;
+    if (char == null) return;
+    try { await char.write([0x00], withoutResponse: true); } catch (_) {}
   }
 
   Future<void> disconnect() async {

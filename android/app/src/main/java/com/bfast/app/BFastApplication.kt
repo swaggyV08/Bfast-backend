@@ -10,3 +10,4 @@ class BFastApplication : Application() {
         // Initialization logic (like logging) will go here
     }
 }
+

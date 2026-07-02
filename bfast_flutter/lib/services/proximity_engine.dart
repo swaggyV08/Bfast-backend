@@ -9,20 +9,20 @@ sealed class ProximityEvent {}
 /// UWB distance measurement — update the UI range indicator.
 class UwbRangeUpdate extends ProximityEvent {
   final double distanceMeters;
-  const UwbRangeUpdate(this.distanceMeters);
+  UwbRangeUpdate(this.distanceMeters);
 }
 
 /// UWB engine confirmed proximity AND local IMU tap simultaneously.
 /// tap_provider must call _onMutualConfirmation() when this fires.
 class TapMutuallyConfirmedByUwb extends ProximityEvent {
-  const TapMutuallyConfirmedByUwb();
+  TapMutuallyConfirmedByUwb();
 }
 
 /// Engine could not function (UWB hardware unavailable, session invalid, timeout).
 /// tap_provider must stop the UwbEngine and fall back to BleImuEngine.
 class ProximityEngineFailure extends ProximityEvent {
   final String reason;
-  const ProximityEngineFailure(this.reason);
+  ProximityEngineFailure(this.reason);
 }
 
 // ── Abstract interface ─────────────────────────────────────────────────────────
@@ -107,7 +107,7 @@ class UwbEngine implements ProximityEngine {
     // If no distance update arrives within 10 s, fall back to BleImuEngine.
     _startupTimer = Timer(const Duration(seconds: 10), () {
       if (!_ctrl.isClosed && _uwb.currentDistance == null) {
-        _ctrl.add(const ProximityEngineFailure('UWB startup timeout'));
+        _ctrl.add(ProximityEngineFailure('UWB startup timeout'));
       }
     });
   }
@@ -116,7 +116,7 @@ class UwbEngine implements ProximityEngine {
   void onLocalTap(TapSignatureLocal sig) {
     if (_ctrl.isClosed) return;
     if (_uwb.isInTapRange()) {
-      _ctrl.add(const TapMutuallyConfirmedByUwb());
+      _ctrl.add(TapMutuallyConfirmedByUwb());
     }
   }
 

@@ -28,12 +28,14 @@ class PeerInfo {
   final String displayName;
   final String role;       // 'SENDER' | 'RECEIVER'
   final String sessionId;  // backend session code ID (scId)
+  final String deviceId;   // backend-registered device UUID (transmitted via encrypted handshake)
 
   const PeerInfo({
     required this.userId,
     required this.displayName,
     required this.role,
     required this.sessionId,
+    this.deviceId = '',
   });
 
   Map<String, dynamic> toJson() => {
@@ -41,6 +43,7 @@ class PeerInfo {
     'd': displayName,
     'r': role,
     's': sessionId,
+    'i': deviceId,
   };
 
   factory PeerInfo.fromJson(Map<String, dynamic> j) => PeerInfo(
@@ -48,6 +51,7 @@ class PeerInfo {
     displayName: j['d'] as String? ?? 'User',
     role:        j['r'] as String? ?? 'RECEIVER',
     sessionId:   j['s'] as String? ?? '',
+    deviceId:    j['i'] as String? ?? '',
   );
 
   Uint8List toBytes() =>

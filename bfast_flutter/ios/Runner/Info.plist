@@ -13,6 +13,7 @@
 	<key>CFBundleSignature</key><string>????</string>
 	<key>CFBundleVersion</key><string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key><true/>
+	<key>UIMainStoryboardFile</key><string>Main</string>
 	<key>UILaunchStoryboardName</key><string>LaunchScreen</string>
 
 	<!-- ── Permissions ──────────────────────────────────────────────── -->
@@ -54,5 +55,8 @@
 
 	<key>CADisableMinimumFrameDurationOnPhone</key><true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key><true/>
+
+	<!-- App uses AES-256-GCM for payment session encryption — required by App Store -->
+	<key>ITSAppUsesNonExemptEncryption</key><true/>
 </dict>
 </plist>

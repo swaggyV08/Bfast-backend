@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -125,6 +126,12 @@ class TapNotifier extends StateNotifier<TapState> {
   // Sender: set to true to stop the motion-event poll loop
   bool _stopPoll = false;
 
+  // Prevents concurrent _connectToReceiver calls from racing each other.
+  bool _connecting = false;
+
+  // Set true by pauseForBackground() so in-flight handshake coroutines abort.
+  bool _paused = false;
+
   ProximityEngine? _activeEngine;
 
   StreamSubscription<List<BleDeviceInfo>>? _receiversSub;
@@ -134,6 +141,7 @@ class TapNotifier extends StateNotifier<TapState> {
   StreamSubscription?                      _engineSub;
   Timer? _sessionTimer;
   Timer? _handshakeTimer;
+  Timer? _keepAliveTimer;
 
   // ── Logging ───────────────────────────────────────────────────────────────
 
@@ -170,6 +178,7 @@ class TapNotifier extends StateNotifier<TapState> {
 
   Future<void> startAsReceiver() async {
     _stopAll();
+    _paused      = false;
     _isSender    = false;
     _respSeqNum  = 0;
     _go(ProtocolPhase.advertising);
@@ -178,10 +187,7 @@ class TapNotifier extends StateNotifier<TapState> {
     try { await _uwb.initialize(); } catch (_) {}
 
     _sensors.startListening();
-    _impulseSub = _sensors.liveImpulseStream
-        .listen((v) => state = state.copyWith(liveImpulse: v));
-
-    _generateBackendSession();
+    await _generateBackendSession();
 
     await _ble.startReceiver(_myDeviceId, _myDisplayName);
     _gattServerSub = _ble.gattServerEvents.listen(_onGattServerEvent);
@@ -193,7 +199,9 @@ class TapNotifier extends StateNotifier<TapState> {
       if (res['success'] == true) {
         _mySessionId = (res['data'] as Map?)?['scId'] as String? ?? '';
       }
-    } catch (_) {}
+    } catch (e) {
+      _log('generateBackendSession failed: $e');
+    }
   }
 
   void _onGattServerEvent(Map<String, dynamic> event) {
@@ -212,6 +220,7 @@ class TapNotifier extends StateNotifier<TapState> {
           _log('Sender disconnected mid-protocol — resetting to advertising');
           _toast('Connection lost', color: Colors.orange);
           _handshakeTimer?.cancel();
+          _sessionTimer?.cancel();
           _disarmImu();
           _session?.dispose();
           _session    = null;
@@ -294,6 +303,7 @@ class TapNotifier extends StateNotifier<TapState> {
           displayName: _myDisplayName,
           role:        'RECEIVER',
           sessionId:   _mySessionId,
+          deviceId:    _myDeviceId,
         );
         sess.localInfo = myInfo;
         _log('Step6: setting session info response in FFF3');
@@ -362,6 +372,7 @@ class TapNotifier extends StateNotifier<TapState> {
 
   Future<void> startAsSender() async {
     _stopAll();
+    _paused          = false;
     _isSender        = true;
     _lastReceiverSeq = 0;
     _stopPoll        = false;
@@ -371,8 +382,7 @@ class TapNotifier extends StateNotifier<TapState> {
     try { await _uwb.initialize(); } catch (_) {}
 
     _sensors.startListening();
-    _impulseSub = _sensors.liveImpulseStream
-        .listen((v) => state = state.copyWith(liveImpulse: v));
+    await _generateBackendSession();
 
     // Recover if receiver drops the connection unexpectedly.
     _disconnectSub = _ble.onGattDisconnected.listen(_onSenderGattDropped);
@@ -425,26 +435,45 @@ class TapNotifier extends StateNotifier<TapState> {
       return;
     }
 
+    final closest = inZone.first;
+    final current = state.selectedReceiver;
+    final shouldSwitch = current == null ||
+        closest.bleAddress != current.bleAddress ||
+        (closest.rssi - current.rssi) > 5;
+
     state = state.copyWith(
       phase:            ProtocolPhase.discovered,
-      nearbyReceivers:  inZone,
-      selectedReceiver: inZone.first,
+      nearbyReceivers:  [closest],
+      selectedReceiver: closest,
     );
-    _connectToReceiver(inZone.first);
+    if (shouldSwitch) _connectToReceiver(closest);
   }
 
   /// Drives the ENTIRE handshake sequentially — write → poll FFF3 → write → poll → …
   /// This replaces the old notification-based approach and is reliable across all Android versions.
   Future<void> _connectToReceiver(BleDeviceInfo receiver) async {
+    if (_connecting) return;
     if (!{ProtocolPhase.discovered, ProtocolPhase.scanning}
         .contains(state.phase)) return;
 
+    _connecting = true;
+    try {
+      await _connectToReceiverImpl(receiver);
+    } finally {
+      _connecting = false;
+    }
+  }
+
+  Future<void> _connectToReceiverImpl(BleDeviceInfo receiver) async {
     _go(ProtocolPhase.connecting, peer: receiver.displayName);
 
     final ok = await _ble.connectToReceiver(receiver.bleAddress);
-    if (!ok || !mounted) {
+    if (!ok || !mounted || _paused) {
       _toast('Could not connect to ${receiver.displayName}', color: Colors.red);
       _go(ProtocolPhase.scanning, clearPeer: true);
+      // Restart scanning — scan was never stopped since connection failed before stopScanning()
+      _ble.startScanning();
+      _receiversSub ??= _ble.nearbyReceiversStream.listen(_onReceiversUpdated);
       return;
     }
 
@@ -476,7 +505,7 @@ class TapNotifier extends StateNotifier<TapState> {
         expectedType: AppConstants.gattMsgCapabilities,
         lastSeq:      _lastReceiverSeq,
         timeoutMs:    5000);
-    if (step2 == null || !mounted) {
+    if (step2 == null || !mounted || _paused) {
       _log('Step2: timeout waiting for capabilities response'); return;
     }
     _lastReceiverSeq = step2[0];
@@ -487,11 +516,13 @@ class TapNotifier extends StateNotifier<TapState> {
       _session!.remoteCapabilities = DeviceCapabilities.fromByte(capPayload[1]);
       _log('Step2: receiver caps received (v${capPayload[0]})');
     }
+    // Start ECDH key generation immediately so it overlaps with BLE stack processing.
+    final keyPairFuture = _session!.generateKeyPair();
     _hsStep = _HandshakeStep.capabilities;
     _go(ProtocolPhase.sessionSetup);
 
     // ── Step 3: generate keypair + send public key ───────────────────────
-    final ourPub = await _session!.generateKeyPair();
+    final ourPub = await keyPairFuture; // typically already done by now
     _hsStep = _HandshakeStep.ecdh;
     try {
       await _ble.senderWriteHandshake(AppConstants.gattMsgPublicKey, ourPub);
@@ -505,7 +536,7 @@ class TapNotifier extends StateNotifier<TapState> {
         expectedType: AppConstants.gattMsgPublicKey,
         lastSeq:      _lastReceiverSeq,
         timeoutMs:    5000);
-    if (step4 == null || !mounted) {
+    if (step4 == null || !mounted || _paused) {
       _log('Step4: timeout waiting for public key response'); return;
     }
     _lastReceiverSeq = step4[0];
@@ -526,7 +557,7 @@ class TapNotifier extends StateNotifier<TapState> {
         expectedType: AppConstants.gattMsgSessionInfo,
         lastSeq:      _lastReceiverSeq,
         timeoutMs:    5000);
-    if (step6 == null || !mounted) {
+    if (step6 == null || !mounted || _paused) {
       _log('Step6: timeout waiting for session info response'); return;
     }
     _lastReceiverSeq = step6[0];
@@ -563,7 +594,7 @@ class TapNotifier extends StateNotifier<TapState> {
               lastSeq:      _lastReceiverSeq,
               timeoutMs:    5000);
 
-          if (step75 != null && mounted) {
+          if (step75 != null && mounted && !_paused) {
             _lastReceiverSeq = step75[0];
             final peerTokenHex = String.fromCharCodes(step75.sublist(2));
             _log('Step7.5b: peer UWB token received — switching to UwbEngine');
@@ -577,6 +608,8 @@ class TapNotifier extends StateNotifier<TapState> {
         }
       }
     }
+
+    if (_paused || !mounted) return;
 
     if (!usingUwb) {
       _engineSub?.cancel();
@@ -598,13 +631,16 @@ class TapNotifier extends StateNotifier<TapState> {
         if (res['success'] == true) {
           _mySessionId = (res['data'] as Map?)?['scId'] as String? ?? '';
         }
-      } catch (_) {}
+      } catch (e) {
+        _log('generateSession fallback failed: $e');
+      }
     }
     final info = PeerInfo(
       userId:      _myUserId,
       displayName: _myDisplayName,
       role:        'SENDER',
       sessionId:   _mySessionId,
+      deviceId:    _myDeviceId,
     );
     sess.localInfo = info;
     _hsStep = _HandshakeStep.sessionInfo;
@@ -621,6 +657,12 @@ class TapNotifier extends StateNotifier<TapState> {
     }
     _armImu();
     _startSessionTimer();
+    // Keep-alive: write null byte to FFF2 every 10s so the iOS GATT watchdog
+    // does not fire during the up-to-60s armed phase.
+    _keepAliveTimer?.cancel();
+    _keepAliveTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      _ble.senderWriteKeepAlive();
+    });
     _go(ProtocolPhase.armed, peer: peerName);
     _toast('Ready — tap phones together', color: const Color(0xFF1E88E5));
   }
@@ -648,8 +690,8 @@ class TapNotifier extends StateNotifier<TapState> {
             _onRemoteMotionPayload(val.sublist(2));
           }
         }
-      } catch (_) {
-        _log('Motion poll error — stopping');
+      } catch (e) {
+        _log('Motion poll error: $e — stopping');
         break;
       }
     }
@@ -801,14 +843,30 @@ class TapNotifier extends StateNotifier<TapState> {
       return;
     }
 
-    state = state.copyWith(phase: ProtocolPhase.paymentCompleted);
+    final connectivity = await Connectivity().checkConnectivity();
+    if (connectivity.isEmpty || connectivity.every((r) => r == ConnectivityResult.none)) {
+      _go(ProtocolPhase.error,
+          error: 'No internet connection. Please check your network and try again.');
+      return;
+    }
+
+    // Use the device ID exchanged during the encrypted GATT handshake.
+    // iOS advertisements carry no manufacturer data, so the scan-time deviceId
+    // is a random BLE MAC — unusable by the backend. remoteInfo.deviceId is
+    // the backend-registered UUID transmitted in PeerInfo step 5/6.
+    final receiverDeviceId =
+        (_session?.remoteInfo?.deviceId.isNotEmpty ?? false)
+            ? _session!.remoteInfo!.deviceId
+            : receiver.deviceId;
+
     try {
       final res = await _api.initiateTransaction(
         sessionCodeId:    sessionId,
-        receiverDeviceId: receiver.deviceId,
+        receiverDeviceId: receiverDeviceId,
         amountInr:        amount,
       );
       if (res['success'] == true) {
+        if (!mounted) return;
         final data = (res['data'] as Map<String, dynamic>?) ?? {};
         state = state.copyWith(
           phase: ProtocolPhase.paymentCompleted,
@@ -825,6 +883,7 @@ class TapNotifier extends StateNotifier<TapState> {
         _go(ProtocolPhase.error, error: 'Payment failed. Please try again.');
       }
     } on Exception catch (e) {
+      if (!mounted) return;
       _go(ProtocolPhase.error,
           error: e.toString().replaceAll('Exception: ', ''));
     }
@@ -835,13 +894,31 @@ class TapNotifier extends StateNotifier<TapState> {
   // ════════════════════════════════════════════════════════════════════════
 
   Future<void> _loadMyInfo() async {
-    _myDeviceId    = await _storage.read(key: 'device_id')    ?? '';
-    _myUserId      = await _storage.read(key: 'user_id')      ?? '';
-    _myDisplayName = await _storage.read(key: 'display_name') ?? 'User';
+    try {
+      _myDeviceId    = await _storage.read(key: 'device_id')    ?? '';
+      _myUserId      = await _storage.read(key: 'user_id')      ?? '';
+      _myDisplayName = await _storage.read(key: 'display_name') ?? '';
+    } catch (e) {
+      _log('Secure storage read failed: $e');
+    }
   }
 
-  void _armImu()    { _tapDetector.armed = true;  _log('IMU armed'); }
-  void _disarmImu() { _tapDetector.armed = false; _log('IMU disarmed'); }
+  void _armImu() {
+    _tapDetector.armed = true;
+    _impulseSub?.cancel();
+    _impulseSub = _sensors.liveImpulseStream
+        .listen((v) => state = state.copyWith(liveImpulse: v));
+    _log('IMU armed');
+  }
+
+  void _disarmImu() {
+    _tapDetector.armed = false;
+    _impulseSub?.cancel();
+    _impulseSub = null;
+    _keepAliveTimer?.cancel();
+    _keepAliveTimer = null;
+    _log('IMU disarmed');
+  }
 
   bool _isTerminal(ProtocolPhase p) => {
     ProtocolPhase.paymentReady, ProtocolPhase.paymentCompleted,
@@ -870,15 +947,13 @@ class TapNotifier extends StateNotifier<TapState> {
             _ble.stopScanning();
             _receiversSub?.cancel();
             _receiversSub = null;
-            Future.delayed(const Duration(seconds: 3), () {
-              if (mounted && state.phase == ProtocolPhase.scanning) {
-                _stopPoll     = false;
-                _lastReceiverSeq = 0;
-                _ble.startScanning();
-                _receiversSub ??=
-                    _ble.nearbyReceiversStream.listen(_onReceiversUpdated);
-              }
-            });
+            if (mounted) {
+              _stopPoll        = false;
+              _lastReceiverSeq = 0;
+              _ble.startScanning();
+              _receiversSub ??=
+                  _ble.nearbyReceiversStream.listen(_onReceiversUpdated);
+            }
           } else {
             _go(ProtocolPhase.advertising, clearPeer: true);
           }
@@ -907,7 +982,9 @@ class TapNotifier extends StateNotifier<TapState> {
     try {
       await _api.reportTapEvent(
           receiverDeviceId: _myDeviceId, accelPeakMs2: sig.peakAccelMs2);
-    } catch (_) {}
+    } catch (e) {
+      _log('reportTapToBackend failed: $e');
+    }
   }
 
   void _toast(String msg, {Color color = Colors.black}) {
@@ -927,6 +1004,7 @@ class TapNotifier extends StateNotifier<TapState> {
 
   void pauseForBackground() {
     _log('App backgrounded');
+    _paused   = true;
     _stopPoll = true;
     _ble.stopScanning();
     _ble.stopReceiver();
@@ -936,7 +1014,10 @@ class TapNotifier extends StateNotifier<TapState> {
 
   void resumeFromBackground() {
     _log('App resumed');
-    if (_isSender) startAsSender(); else startAsReceiver();
+    final fn = _isSender ? startAsSender : startAsReceiver;
+    fn()
+        .timeout(const Duration(seconds: 10), onTimeout: () { reset(); })
+        .catchError((_) { reset(); });
   }
 
   // ════════════════════════════════════════════════════════════════════════
@@ -947,6 +1028,7 @@ class TapNotifier extends StateNotifier<TapState> {
     _stopPoll = true;
     _sessionTimer?.cancel();
     _handshakeTimer?.cancel();
+    _keepAliveTimer?.cancel();
     _receiversSub?.cancel();
     _impulseSub?.cancel();
     _gattServerSub?.cancel();
@@ -976,6 +1058,8 @@ class TapNotifier extends StateNotifier<TapState> {
     _hsStep          = _HandshakeStep.idle;
     _respSeqNum      = 0;
     _lastReceiverSeq = 0;
+    _connecting      = false;
+    _paused          = false;
   }
 
   void reset() {

@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
+
 import '../../core/theme/app_theme.dart';
 import '../../providers/auth_provider.dart';
 
@@ -28,9 +28,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     final authState = ref.watch(authProvider);
 
     ref.listen<AuthState>(authProvider, (_, next) {
+      if (!context.mounted) return;
       if (next is AuthAuthenticated) {
         ref.read(authProvider.notifier).resetError();
-        context.go('/home');
+        Navigator.pushNamedAndRemoveUntil(context, '/home', (_) => false);
       }
     });
 
@@ -148,7 +149,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 // Register link
                 Center(
                   child: TextButton(
-                    onPressed: () => context.push('/register'),
+                    onPressed: () => Navigator.pushNamed(context, '/register'),
                     child: const Text(
                       "New user? Register",
                       style: TextStyle(color: AppTheme.primary),

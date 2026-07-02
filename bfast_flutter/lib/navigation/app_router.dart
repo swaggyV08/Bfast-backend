@@ -12,19 +12,8 @@ import '../screens/sensor_test/sensor_test_screen.dart';
 import '../screens/home/transaction_history_screen.dart';
 
 final appRouterProvider = Provider<GoRouter>((ref) {
-  ref.watch(authProvider.notifier);
-
   return GoRouter(
     initialLocation: '/login',
-    redirect: (context, state) async {
-      final isLoggedIn  = await ref.read(apiServiceProvider).isLoggedIn();
-      final isLoginPage = state.matchedLocation == '/login' ||
-                          state.matchedLocation == '/register';
-
-      if (!isLoggedIn && !isLoginPage) return '/login';
-      if (isLoggedIn  && isLoginPage)  return '/home';
-      return null;
-    },
     routes: [
       GoRoute(
         path:    '/login',

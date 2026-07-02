@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
+
 import '../../core/theme/app_theme.dart';
 import '../../providers/tap_provider.dart';
 
@@ -87,7 +87,7 @@ class ResultScreen extends ConsumerWidget {
               ElevatedButton(
                 onPressed: () {
                   ref.read(tapProvider.notifier).reset();
-                  context.go('/home');
+                  Navigator.pushNamedAndRemoveUntil(context, '/home', (_) => false);
                 },
                 child: const Text('Back to Home'),
               ),
@@ -97,7 +97,7 @@ class ResultScreen extends ConsumerWidget {
                 OutlinedButton(
                   onPressed: () {
                     ref.read(tapProvider.notifier).reset();
-                    context.go('/payment/sender');
+                    Navigator.pushNamedAndRemoveUntil(context, '/payment/sender', (r) => r.isFirst);
                   },
                   child: const Text('Try Again'),
                 ),

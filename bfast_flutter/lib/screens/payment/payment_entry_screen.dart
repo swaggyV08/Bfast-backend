@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
+
+import '../../core/constants/app_constants.dart';
 import '../../core/theme/app_theme.dart';
 import '../../providers/tap_provider.dart';
 
@@ -29,9 +30,11 @@ class _PaymentEntryScreenState extends ConsumerState<PaymentEntryScreen> {
     final receiver = tapState.selectedReceiver;
 
     ref.listen<TapState>(tapProvider, (_, next) {
+      if (!context.mounted) return;
       if (next.phase == TapPhase.paymentCompleted) {
-        context.go('/payment/result');
+        Navigator.pushNamedAndRemoveUntil(context, '/payment/result', (r) => r.isFirst);
       } else if (next.phase == TapPhase.error) {
+        if (!mounted) return;
         setState(() => _submitting = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -50,11 +53,12 @@ class _PaymentEntryScreenState extends ConsumerState<PaymentEntryScreen> {
         title: const Text('Send Payment'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
-          onPressed: isProcessing ? null : () => context.pop(),
+          onPressed: isProcessing ? null : () => Navigator.pop(context),
         ),
       ),
       body: SafeArea(
-        child: Padding(
+        child: SingleChildScrollView(
+          child: Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
             children: [
@@ -147,7 +151,7 @@ class _PaymentEntryScreenState extends ConsumerState<PaymentEntryScreen> {
                 ],
               ),
 
-              const Spacer(),
+              const SizedBox(height: 32),
 
               // Pay button
               ElevatedButton(
@@ -170,12 +174,13 @@ class _PaymentEntryScreenState extends ConsumerState<PaymentEntryScreen> {
               OutlinedButton(
                 onPressed: isProcessing ? null : () {
                   ref.read(tapProvider.notifier).reset();
-                  context.go('/home');
+                  Navigator.pushNamedAndRemoveUntil(context, '/home', (_) => false);
                 },
                 child: const Text('Cancel'),
               ),
               const SizedBox(height: 16),
             ],
+          ),
           ),
         ),
       ),
@@ -185,10 +190,20 @@ class _PaymentEntryScreenState extends ConsumerState<PaymentEntryScreen> {
   void _onPay() {
     final amountStr = _amountCtrl.text.trim().replaceAll(',', '');
     final amount    = double.tryParse(amountStr);
-    if (amount == null || amount <= 0) {
+    if (amount == null || !amount.isFinite || amount <= 0) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Please enter a valid amount'),
+          backgroundColor: AppTheme.error,
+        ),
+      );
+      return;
+    }
+    if (amount > AppConstants.maxPaymentInr) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Maximum payment amount is ₹${AppConstants.maxPaymentInr.toStringAsFixed(0)}'),
           backgroundColor: AppTheme.error,
         ),
       );
