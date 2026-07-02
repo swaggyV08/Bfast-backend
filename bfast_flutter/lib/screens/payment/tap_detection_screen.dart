@@ -29,6 +29,10 @@ class _TapDetectionScreenState extends ConsumerState<TapDetectionScreen>
   late AnimationController _pulseController;
   late Animation<double>   _pulseAnimation;
 
+  // Guard: prevent duplicate Navigator.pushNamed('/payment/entry') if
+  // ref.listen fires more than once (e.g., during rapid state transitions).
+  bool _navigatedToEntry = false;
+
   @override
   void initState() {
     super.initState();
@@ -64,7 +68,8 @@ class _TapDetectionScreenState extends ConsumerState<TapDetectionScreen>
     // Auto-navigate sender to payment entry when tap confirmed
     ref.listen<TapState>(tapProvider, (prev, next) {
       if (!context.mounted) return;
-      if (next.phase == TapPhase.paymentReady && widget.isSender) {
+      if (next.phase == TapPhase.paymentReady && widget.isSender && !_navigatedToEntry) {
+        _navigatedToEntry = true;
         Navigator.pushNamed(context, '/payment/entry');
       }
       if (next.phase == TapPhase.error) {

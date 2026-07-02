@@ -24,6 +24,7 @@ class _PaymentIncomingScreenState extends ConsumerState<PaymentIncomingScreen>
   late Animation<double>   _pulseAnim;
 
   Timer?  _pollTimer;
+  Timer?  _timeoutTimer;
   double? _initialBalance;
   double? _receivedAmount;
   bool    _paymentReceived = false;
@@ -53,6 +54,15 @@ class _PaymentIncomingScreenState extends ConsumerState<PaymentIncomingScreen>
     }
 
     _pollTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) => _pollBalance());
+
+    // Safety valve: if the sender's payment never arrives (API failure, network
+    // drop, etc.) the receiver must not be stuck on this screen forever.
+    // After 90 seconds navigate back to home so the receiver can re-arm.
+    _timeoutTimer = Timer(const Duration(seconds: 90), () {
+      if (mounted && !_paymentReceived) {
+        Navigator.pushNamedAndRemoveUntil(context, '/home', (_) => false);
+      }
+    });
   }
 
   Future<void> _pollBalance() async {
@@ -84,6 +94,7 @@ class _PaymentIncomingScreenState extends ConsumerState<PaymentIncomingScreen>
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _timeoutTimer?.cancel();
     _pulseController.dispose();
     super.dispose();
   }

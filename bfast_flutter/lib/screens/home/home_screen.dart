@@ -150,7 +150,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   subtitle: 'Tap phones to pay',
                   color:    AppTheme.primary,
                   onTap: () {
-                    ref.read(tapProvider.notifier).reset();
+                    // Do NOT call reset() here: it sets phase=idle, which triggers
+                    // ref.listen → startAsReceiver() racing with startAsSender().
+                    // startAsSender() calls _stopAll() internally and handles cleanup.
                     Navigator.pushNamed(context, '/payment/sender');
                   },
                 ),

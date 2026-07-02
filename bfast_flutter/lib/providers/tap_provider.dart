@@ -132,6 +132,12 @@ class TapNotifier extends StateNotifier<TapState> {
   // Set true by pauseForBackground() so in-flight handshake coroutines abort.
   bool _paused = false;
 
+  // Incremented by _stopAll() so every in-flight startAsSender/startAsReceiver
+  // async chain can detect it has been superseded and bail out before mutating
+  // state. Prevents stale startAsReceiver() continuations from overwriting a
+  // subsequently started startAsSender() (and vice-versa).
+  int _startGeneration = 0;
+
   ProximityEngine? _activeEngine;
 
   StreamSubscription<List<BleDeviceInfo>>? _receiversSub;
@@ -178,18 +184,26 @@ class TapNotifier extends StateNotifier<TapState> {
 
   Future<void> startAsReceiver() async {
     _stopAll();
+    final myGen  = _startGeneration; // captured AFTER _stopAll incremented it
     _paused      = false;
     _isSender    = false;
     _respSeqNum  = 0;
     _go(ProtocolPhase.advertising);
 
     await _loadMyInfo();
+    if (_startGeneration != myGen || !mounted) return;
     try { await _uwb.initialize(); } catch (_) {}
+    if (_startGeneration != myGen || !mounted) return;
 
     _sensors.startListening();
     await _generateBackendSession();
+    if (_startGeneration != myGen || !mounted) return;
 
     await _ble.startReceiver(_myDeviceId, _myDisplayName);
+    // Guard: if startAsSender() ran while we were awaiting, abort here.
+    // Without this check the stale startAsReceiver continuation would
+    // install a _gattServerSub on the sender device, corrupting state.
+    if (_startGeneration != myGen || !mounted) return;
     _gattServerSub = _ble.gattServerEvents.listen(_onGattServerEvent);
   }
 
@@ -298,6 +312,13 @@ class TapNotifier extends StateNotifier<TapState> {
         sess.remoteInfo = senderInfo;
         _go(ProtocolPhase.sessionSetup, peer: senderInfo.displayName);
 
+        // If the initial generateBackendSession() failed, retry once here
+        // before encoding our PeerInfo — an empty sessionId would cause
+        // the sender's submitPayment to fail with "Session expired".
+        if (_mySessionId.isEmpty) {
+          await _generateBackendSession();
+        }
+
         final myInfo = PeerInfo(
           userId:      _myUserId,
           displayName: _myDisplayName,
@@ -306,7 +327,7 @@ class TapNotifier extends StateNotifier<TapState> {
           deviceId:    _myDeviceId,
         );
         sess.localInfo = myInfo;
-        _log('Step6: setting session info response in FFF3');
+        _log('Step6: setting session info response in FFF3 (sessionId=${_mySessionId.isNotEmpty ? "set" : "EMPTY"})');
         await _setReceiverResponse(
             GattMsg.encode(AppConstants.gattMsgSessionInfo, myInfo.toBytes()));
         _log('Step6: session info response set (seq=$_respSeqNum)');
@@ -372,6 +393,7 @@ class TapNotifier extends StateNotifier<TapState> {
 
   Future<void> startAsSender() async {
     _stopAll();
+    final myGen      = _startGeneration; // captured AFTER _stopAll incremented it
     _paused          = false;
     _isSender        = true;
     _lastReceiverSeq = 0;
@@ -379,16 +401,20 @@ class TapNotifier extends StateNotifier<TapState> {
     _go(ProtocolPhase.scanning, clearPeer: true);
 
     await _loadMyInfo();
+    if (_startGeneration != myGen || !mounted) return;
     try { await _uwb.initialize(); } catch (_) {}
+    if (_startGeneration != myGen || !mounted) return;
 
     _sensors.startListening();
     await _generateBackendSession();
+    if (_startGeneration != myGen || !mounted) return;
 
     // Recover if receiver drops the connection unexpectedly.
     _disconnectSub = _ble.onGattDisconnected.listen(_onSenderGattDropped);
 
     try {
       await _ble.startScanning();
+      if (_startGeneration != myGen || !mounted) return;
       _receiversSub = _ble.nearbyReceiversStream.listen(_onReceiversUpdated);
     } catch (_) {}
   }
@@ -465,10 +491,11 @@ class TapNotifier extends StateNotifier<TapState> {
   }
 
   Future<void> _connectToReceiverImpl(BleDeviceInfo receiver) async {
+    final myGen = _startGeneration; // detect if reset() fires mid-handshake
     _go(ProtocolPhase.connecting, peer: receiver.displayName);
 
     final ok = await _ble.connectToReceiver(receiver.bleAddress);
-    if (!ok || !mounted || _paused) {
+    if (!ok || !mounted || _paused || _startGeneration != myGen) {
       _toast('Could not connect to ${receiver.displayName}', color: Colors.red);
       _go(ProtocolPhase.scanning, clearPeer: true);
       // Restart scanning — scan was never stopped since connection failed before stopScanning()
@@ -497,7 +524,7 @@ class TapNotifier extends StateNotifier<TapState> {
       _log('Step1: capabilities written');
     } catch (e) {
       _log('Step1 FAILED: $e');
-      return;
+      _abortHandshake(); return;
     }
 
     // ── Step 2: read receiver's capabilities from FFF3 ───────────────────
@@ -505,8 +532,9 @@ class TapNotifier extends StateNotifier<TapState> {
         expectedType: AppConstants.gattMsgCapabilities,
         lastSeq:      _lastReceiverSeq,
         timeoutMs:    5000);
-    if (step2 == null || !mounted || _paused) {
-      _log('Step2: timeout waiting for capabilities response'); return;
+    if (step2 == null || !mounted || _paused || _startGeneration != myGen) {
+      _log('Step2: timeout waiting for capabilities response');
+      _abortHandshake(); return;
     }
     _lastReceiverSeq = step2[0];
     final capPayload  = step2.sublist(2); // [protocolVersion, capsByte]
@@ -523,12 +551,13 @@ class TapNotifier extends StateNotifier<TapState> {
 
     // ── Step 3: generate keypair + send public key ───────────────────────
     final ourPub = await keyPairFuture; // typically already done by now
+    if (_startGeneration != myGen || !mounted || _paused) { _abortHandshake(); return; }
     _hsStep = _HandshakeStep.ecdh;
     try {
       await _ble.senderWriteHandshake(AppConstants.gattMsgPublicKey, ourPub);
       _log('Step3: public key written (${ourPub.length}B)');
     } catch (e) {
-      _log('Step3 FAILED: $e'); return;
+      _log('Step3 FAILED: $e'); _abortHandshake(); return;
     }
 
     // ── Step 4: read receiver's public key ───────────────────────────────
@@ -536,34 +565,38 @@ class TapNotifier extends StateNotifier<TapState> {
         expectedType: AppConstants.gattMsgPublicKey,
         lastSeq:      _lastReceiverSeq,
         timeoutMs:    5000);
-    if (step4 == null || !mounted || _paused) {
-      _log('Step4: timeout waiting for public key response'); return;
+    if (step4 == null || !mounted || _paused || _startGeneration != myGen) {
+      _log('Step4: timeout waiting for public key response');
+      _abortHandshake(); return;
     }
     _lastReceiverSeq = step4[0];
     final peerPub = step4.sublist(2);
     _log('Step4: receiver public key received (${peerPub.length}B)');
     await _session!.computeSharedSecret(peerPub);
     _log('Shared secret derived (sender)');
+    if (_startGeneration != myGen || !mounted || _paused) { _abortHandshake(); return; }
 
     // ── Step 5: send session info ────────────────────────────────────────
     try {
       await _senderSendSessionInfo(_session!);
     } catch (e) {
-      _log('Step5 FAILED: $e'); return;
+      _log('Step5 FAILED: $e'); _abortHandshake(); return;
     }
+    if (_startGeneration != myGen || !mounted || _paused) { _abortHandshake(); return; }
 
     // ── Step 6: read receiver's session info ─────────────────────────────
     final step6 = await _ble.senderWaitForResponse(
         expectedType: AppConstants.gattMsgSessionInfo,
         lastSeq:      _lastReceiverSeq,
         timeoutMs:    5000);
-    if (step6 == null || !mounted || _paused) {
-      _log('Step6: timeout waiting for session info response'); return;
+    if (step6 == null || !mounted || _paused || _startGeneration != myGen) {
+      _log('Step6: timeout waiting for session info response');
+      _abortHandshake(); return;
     }
     _lastReceiverSeq = step6[0];
     final receiverInfo = PeerInfo.fromBytes(step6.sublist(2));
     if (receiverInfo == null) {
-      _log('Step6: FAILED to parse receiver PeerInfo'); return;
+      _log('Step6: FAILED to parse receiver PeerInfo'); _abortHandshake(); return;
     }
     _session!.remoteInfo = receiverInfo;
     _log('Session ready: receiver=${receiverInfo.displayName}');
@@ -573,7 +606,7 @@ class TapNotifier extends StateNotifier<TapState> {
       await _ble.senderWriteHandshake(AppConstants.gattMsgSessionAck, [0x01]);
       _log('Step7: ACK written');
     } catch (e) {
-      _log('Step7 FAILED: $e'); return;
+      _log('Step7 FAILED: $e'); _abortHandshake(); return;
     }
 
     _hsStep = _HandshakeStep.complete;
@@ -834,12 +867,29 @@ class TapNotifier extends StateNotifier<TapState> {
   // ════════════════════════════════════════════════════════════════════════
 
   Future<void> submitPayment(double amount) async {
-    final receiver  = state.selectedReceiver;
-    final sessionId = _session?.remoteInfo?.sessionId ??
-                      _session?.localInfo?.sessionId  ?? '';
-
-    if (receiver == null || sessionId.isEmpty) {
+    final receiver = state.selectedReceiver;
+    if (receiver == null) {
       _go(ProtocolPhase.error, error: 'Session expired. Please tap again.');
+      return;
+    }
+
+    // Prefer receiver's sessionId (from encrypted step-6 PeerInfo).
+    // Fall back to sender's own sessionId.  If both are empty — which
+    // happens when both generateSession() calls failed — attempt one
+    // last-resort generation before showing an error.
+    var sessionId = _session?.remoteInfo?.sessionId.isNotEmpty == true
+        ? _session!.remoteInfo!.sessionId
+        : (_session?.localInfo?.sessionId ?? '');
+
+    if (sessionId.isEmpty) {
+      await _generateBackendSession();
+      sessionId = _mySessionId;
+    }
+
+    if (sessionId.isEmpty) {
+      _go(ProtocolPhase.error,
+          error: 'Could not create a payment session. '
+              'Please check your connection and try again.');
       return;
     }
 
@@ -924,6 +974,29 @@ class TapNotifier extends StateNotifier<TapState> {
     ProtocolPhase.paymentReady, ProtocolPhase.paymentCompleted,
     ProtocolPhase.mutualConfirmation, ProtocolPhase.error,
   }.contains(p);
+
+  /// Called by sender when any handshake step times out or fails.
+  /// Immediately disconnects, clears session state, and restarts scanning
+  /// so the UX recovers in <1 second instead of waiting for the 20s timer.
+  void _abortHandshake() {
+    _handshakeTimer?.cancel();
+    _handshakeTimer  = null;
+    _stopPoll        = true;
+    _session?.dispose();
+    _session         = null;
+    _hsStep          = _HandshakeStep.idle;
+    _lastReceiverSeq = 0;
+    _ble.disconnect();
+    _go(ProtocolPhase.scanning, clearPeer: true);
+    _receiversSub?.cancel();
+    _receiversSub = null;
+    if (mounted) {
+      _stopPoll        = false;
+      _lastReceiverSeq = 0;
+      _ble.startScanning();
+      _receiversSub = _ble.nearbyReceiversStream.listen(_onReceiversUpdated);
+    }
+  }
 
   void _startHandshakeTimer() {
     _handshakeTimer?.cancel();
@@ -1025,6 +1098,7 @@ class TapNotifier extends StateNotifier<TapState> {
   // ════════════════════════════════════════════════════════════════════════
 
   void _stopAll() {
+    _startGeneration++; // invalidate all in-flight startAsSender/startAsReceiver chains
     _stopPoll = true;
     _sessionTimer?.cancel();
     _handshakeTimer?.cancel();
